@@ -1,0 +1,23 @@
+[package]
+name = "intentdb"
+version = "0.1.0"
+edition = "2021"
+description = "Schema-free, natural language storage engine"
+license = "MIT"
+repository = "https://github.com/zzzzico12/intentdb"
+keywords = ["database", "vector", "embedding", "nlp", "search"]
+categories = ["database", "command-line-utilities"]
+readme = "README.md"
+
+[[bin]]
+name = "idb"
+path = "src/main.rs"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+reqwest = { version = "0.12", features = ["json", "blocking"] }
+uuid = { version = "1", features = ["v4"] }
+clap = { version = "4", features = ["derive"] }
+anyhow = "1"
+byteorder = "1"
