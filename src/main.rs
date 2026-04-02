@@ -25,6 +25,9 @@ enum Commands {
     Put {
         /// 保存したいテキスト（自由形式）
         text: String,
+        /// タグを付ける（複数指定可）
+        #[arg(short, long = "tag")]
+        tags: Vec<String>,
     },
     /// 自然言語で検索する
     Search {
@@ -33,9 +36,16 @@ enum Commands {
         /// 返す件数
         #[arg(short, long, default_value = "5")]
         top: usize,
+        /// タグでフィルタリング（複数指定時はAND）
+        #[arg(short, long = "tag")]
+        tags: Vec<String>,
     },
     /// 全件表示
-    List,
+    List {
+        /// タグでフィルタリング（複数指定時はAND）
+        #[arg(short, long = "tag")]
+        tags: Vec<String>,
+    },
     /// データを削除する（IDの先頭8文字で指定）
     Delete {
         /// 削除するレコードのID（先頭8文字以上）
@@ -45,34 +55,36 @@ enum Commands {
 
 // ─── データ構造 ─────────────────────────────────────────────────────────────
 
-/// 1レコード = テキスト + ベクトル（embedding）
-/// .idbファイルに独自バイナリ形式で保存する
 #[derive(Serialize, Deserialize, Debug, Clone)]
 struct IntentRecord {
     id: String,
     text: String,
     vector: Vec<f32>, // 1536次元（OpenAI text-embedding-3-small）
     timestamp: u64,
+    tags: Vec<String>,
 }
 
 // ─── .idbファイルフォーマット ───────────────────────────────────────────────
 //
-// [MAGIC: 4B "IDB1"]
+// [MAGIC: 4B "IDB2"]
 // [レコード数: u32]
-// [レコード1][レコード2]...
-//
 // 各レコード:
-// [idの長さ: u16][id bytes]
-// [textの長さ: u32][text bytes]
-// [vector次元数: u32][f32 x N]
-// [timestamp: u64]
+//   [idの長さ: u16][id bytes]
+//   [textの長さ: u32][text bytes]
+//   [vector次元数: u32][f32 x N]
+//   [timestamp: u64]
+//   [tags数: u16]
+//     [tagの長さ: u16][tag bytes]  x tags数
+//
+// IDB1との差分: tagsフィールドが追加。IDB1読み込み時はtags=[]として扱う。
 
-const MAGIC: &[u8; 4] = b"IDB1";
+const MAGIC_V2: &[u8; 4] = b"IDB2";
+const MAGIC_V1: &[u8; 4] = b"IDB1";
 
 fn write_db(path: &PathBuf, records: &[IntentRecord]) -> Result<()> {
     let mut f = std::fs::File::create(path)?;
 
-    f.write_all(MAGIC)?;
+    f.write_all(MAGIC_V2)?;
     f.write_u32::<LittleEndian>(records.len() as u32)?;
 
     for rec in records {
@@ -94,6 +106,14 @@ fn write_db(path: &PathBuf, records: &[IntentRecord]) -> Result<()> {
 
         // timestamp
         f.write_u64::<LittleEndian>(rec.timestamp)?;
+
+        // tags
+        f.write_u16::<LittleEndian>(rec.tags.len() as u16)?;
+        for tag in &rec.tags {
+            let tag_bytes = tag.as_bytes();
+            f.write_u16::<LittleEndian>(tag_bytes.len() as u16)?;
+            f.write_all(tag_bytes)?;
+        }
     }
 
     Ok(())
@@ -106,12 +126,15 @@ fn read_db(path: &PathBuf) -> Result<Vec<IntentRecord>> {
 
     let mut f = std::fs::File::open(path)?;
 
-    // マジックバイト確認
     let mut magic = [0u8; 4];
     f.read_exact(&mut magic)?;
-    if &magic != MAGIC {
+    let has_tags = if &magic == MAGIC_V2 {
+        true
+    } else if &magic == MAGIC_V1 {
+        false
+    } else {
         anyhow::bail!("不正なファイル形式です（マジックバイト不一致）");
-    }
+    };
 
     let count = f.read_u32::<LittleEndian>()? as usize;
     let mut records = Vec::with_capacity(count);
@@ -139,10 +162,39 @@ fn read_db(path: &PathBuf) -> Result<Vec<IntentRecord>> {
         // timestamp
         let timestamp = f.read_u64::<LittleEndian>()?;
 
-        records.push(IntentRecord { id, text, vector, timestamp });
+        // tags（IDB1は空）
+        let tags = if has_tags {
+            let tag_count = f.read_u16::<LittleEndian>()? as usize;
+            let mut tags = Vec::with_capacity(tag_count);
+            for _ in 0..tag_count {
+                let tag_len = f.read_u16::<LittleEndian>()? as usize;
+                let mut tag_bytes = vec![0u8; tag_len];
+                f.read_exact(&mut tag_bytes)?;
+                tags.push(String::from_utf8(tag_bytes)?);
+            }
+            tags
+        } else {
+            vec![]
+        };
+
+        records.push(IntentRecord { id, text, vector, timestamp, tags });
     }
 
     Ok(records)
+}
+
+// ─── タグフィルタ ──────────────────────────────────────────────────────────
+
+fn matches_tags(rec: &IntentRecord, filter: &[String]) -> bool {
+    filter.iter().all(|t| rec.tags.contains(t))
+}
+
+fn format_tags(tags: &[String]) -> String {
+    if tags.is_empty() {
+        String::new()
+    } else {
+        format!(" [{}]", tags.join(", "))
+    }
 }
 
 // ─── OpenAI Embedding API ──────────────────────────────────────────────────
@@ -183,7 +235,7 @@ fn get_embedding(text: &str, api_key: &str) -> Result<Vec<f32>> {
     Ok(resp.data.into_iter().next().unwrap().embedding)
 }
 
-// ─── コサイン類似度（検索の核心） ─────────────────────────────────────────
+// ─── コサイン類似度 ────────────────────────────────────────────────────────
 
 fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
     let dot: f32 = a.iter().zip(b.iter()).map(|(x, y)| x * y).sum();
@@ -200,12 +252,11 @@ fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
 fn main() -> Result<()> {
     let cli = Cli::parse();
 
-    // APIキーを環境変数から取得
     let api_key = std::env::var("OPENAI_API_KEY")
         .context("環境変数 OPENAI_API_KEY が設定されていません\n例: export OPENAI_API_KEY=sk-...")?;
 
     match cli.command {
-        Commands::Put { text } => {
+        Commands::Put { text, tags } => {
             println!("📥 embedding生成中...");
             let vector = get_embedding(&text, &api_key)?;
 
@@ -215,15 +266,18 @@ fn main() -> Result<()> {
                 .duration_since(std::time::UNIX_EPOCH)?
                 .as_secs();
 
-            records.push(IntentRecord { id: id.clone(), text: text.clone(), vector, timestamp });
+            records.push(IntentRecord { id: id.clone(), text: text.clone(), vector, timestamp, tags: tags.clone() });
             write_db(&cli.file, &records)?;
 
             println!("✅ 保存しました（合計 {} 件）", records.len());
             println!("   ID: {}", &id[..8]);
             println!("   テキスト: {}", text);
+            if !tags.is_empty() {
+                println!("   タグ: {}", tags.join(", "));
+            }
         }
 
-        Commands::Search { query, top } => {
+        Commands::Search { query, top, tags } => {
             let records = read_db(&cli.file)?;
             if records.is_empty() {
                 println!("DBにデータがありません。まず `idb put \"テキスト\"` で追加してください。");
@@ -233,37 +287,46 @@ fn main() -> Result<()> {
             println!("🔍 「{}」で検索中...", query);
             let query_vec = get_embedding(&query, &api_key)?;
 
-            // コサイン類似度でスコアリング
             let mut scored: Vec<(f32, &IntentRecord)> = records
                 .iter()
+                .filter(|rec| matches_tags(rec, &tags))
                 .map(|rec| (cosine_similarity(&query_vec, &rec.vector), rec))
                 .collect();
 
             scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap());
 
+            if !tags.is_empty() {
+                println!("   タグフィルタ: {}", tags.join(", "));
+            }
             println!("\n結果（上位 {} 件）:", top.min(scored.len()));
             println!("{}", "─".repeat(50));
 
             for (i, (score, rec)) in scored.iter().take(top).enumerate() {
-                println!("{}. [スコア: {:.3}]", i + 1, score);
+                println!("{}. [スコア: {:.3}]{}", i + 1, score, format_tags(&rec.tags));
                 println!("   {}", rec.text);
                 println!("   ID: {}...", &rec.id[..8]);
                 println!();
             }
         }
 
-        Commands::List => {
+        Commands::List { tags } => {
             let records = read_db(&cli.file)?;
             if records.is_empty() {
                 println!("DBにデータがありません。");
                 return Ok(());
             }
 
-            println!("📋 全 {} 件", records.len());
+            let filtered: Vec<&IntentRecord> = records.iter().filter(|rec| matches_tags(rec, &tags)).collect();
+
+            if !tags.is_empty() {
+                println!("📋 {} 件（タグフィルタ: {}）", filtered.len(), tags.join(", "));
+            } else {
+                println!("📋 全 {} 件", filtered.len());
+            }
             println!("{}", "─".repeat(50));
 
-            for (i, rec) in records.iter().enumerate() {
-                println!("{}. [{}...] {}", i + 1, &rec.id[..8], rec.text);
+            for (i, rec) in filtered.iter().enumerate() {
+                println!("{}. [{}...]{} {}", i + 1, &rec.id[..8], format_tags(&rec.tags), rec.text);
             }
         }
 
