@@ -11,7 +11,7 @@ use axum::{
 use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
 use clap::{Parser, Subcommand};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::{Read, Write};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -37,13 +37,30 @@ enum Commands {
         #[arg(short, long = "tag")]
         tags: Vec<String>,
     },
-    /// 自然言語で検索する（HNSWインデックス使用）
+    /// 既存レコードを更新する（IDの先頭8文字で指定）
+    Update {
+        /// 更新するレコードのID（先頭8文字以上）
+        id: String,
+        /// 新しいテキスト
+        text: String,
+        /// タグを上書きする（省略時は既存タグを維持）
+        #[arg(short, long = "tag")]
+        tags: Vec<String>,
+    },
+    /// 自然言語で検索する
     Search {
         query: String,
         #[arg(short, long, default_value = "5")]
         top: usize,
         #[arg(short, long = "tag")]
         tags: Vec<String>,
+    },
+    /// IDに近いレコードを探す
+    Related {
+        /// 起点にするレコードのID（先頭8文字以上）
+        id: String,
+        #[arg(short, long, default_value = "5")]
+        top: usize,
     },
     /// 全件表示
     List {
@@ -52,6 +69,32 @@ enum Commands {
     },
     /// データを削除する（IDの先頭8文字で指定）
     Delete { id: String },
+    /// ファイルから一括インポートする（JSON / CSV / TXT）
+    Import {
+        /// インポートするファイルのパス
+        path: PathBuf,
+        /// フォーマット（json | csv | txt）。省略時は拡張子から自動判定
+        #[arg(short, long)]
+        format: Option<String>,
+    },
+    /// DBをファイルにエクスポートする
+    Export {
+        /// 出力先ファイルのパス（省略時は標準出力）
+        #[arg(short, long)]
+        output: Option<PathBuf>,
+        /// フォーマット（json | csv）。デフォルト: json
+        #[arg(short, long, default_value = "json")]
+        format: String,
+    },
+    /// 重複レコードを検出する
+    Dedup {
+        /// 類似度がこの値以上なら重複とみなす（0.0〜1.0）
+        #[arg(long, default_value = "0.95")]
+        threshold: f32,
+        /// 重複を自動削除する（新しいほうを残す）
+        #[arg(long)]
+        delete: bool,
+    },
     /// HTTP APIサーバーを起動する
     Serve {
         #[arg(short, long, default_value = "3000")]
@@ -70,15 +113,24 @@ struct IntentRecord {
     tags: Vec<String>,
 }
 
+// インポートファイルの1行
+#[derive(Deserialize)]
+struct ImportEntry {
+    text: String,
+    #[serde(default)]
+    tags: Vec<String>,
+}
+
+// エクスポート用（ベクトルは除く）
+#[derive(Serialize)]
+struct ExportEntry<'a> {
+    id: &'a str,
+    text: &'a str,
+    tags: &'a Vec<String>,
+    timestamp: u64,
+}
+
 // ─── .idbファイルフォーマット ───────────────────────────────────────────────
-//
-// [MAGIC: 4B "IDB2"][レコード数: u32]
-// 各レコード:
-//   [idの長さ: u16][id bytes]
-//   [textの長さ: u32][text bytes]
-//   [vector次元数: u32][f32 x N]
-//   [timestamp: u64]
-//   [tags数: u16][[tagの長さ: u16][tag bytes] x tags数]
 
 const MAGIC_V2: &[u8; 4] = b"IDB2";
 const MAGIC_V1: &[u8; 4] = b"IDB1";
@@ -164,7 +216,6 @@ fn hnsw_path(db_path: &PathBuf) -> PathBuf {
     db_path.with_extension("hnsw")
 }
 
-/// HNSWインデックスを読み込む。存在しないまたは件数不一致なら再構築して保存。
 fn load_or_build_hnsw(db_path: &PathBuf, records: &[IntentRecord]) -> Result<hnsw::Hnsw> {
     let hp = hnsw_path(db_path);
     let index = hnsw::Hnsw::load(&hp)?;
@@ -174,8 +225,16 @@ fn load_or_build_hnsw(db_path: &PathBuf, records: &[IntentRecord]) -> Result<hns
     if !records.is_empty() {
         eprintln!("🔧 インデックスを構築中 ({} 件)...", records.len());
     }
-    let index = hnsw::Hnsw::build(records.iter().map(|r| (r.id.clone(), r.vector.clone())));
+    let index =
+        hnsw::Hnsw::build(records.iter().map(|r| (r.id.clone(), r.vector.clone())));
     index.save(&hp)?;
+    Ok(index)
+}
+
+fn rebuild_and_save_hnsw(db_path: &PathBuf, records: &[IntentRecord]) -> Result<hnsw::Hnsw> {
+    let index =
+        hnsw::Hnsw::build(records.iter().map(|r| (r.id.clone(), r.vector.clone())));
+    index.save(&hnsw_path(db_path))?;
     Ok(index)
 }
 
@@ -191,6 +250,13 @@ fn format_tags(tags: &[String]) -> String {
     } else {
         format!(" [{}]", tags.join(", "))
     }
+}
+
+fn now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
 }
 
 // ─── OpenAI Embedding API ──────────────────────────────────────────────────
@@ -213,7 +279,10 @@ struct EmbedData {
 
 async fn get_embedding(text: &str, api_key: &str) -> Result<Vec<f32>> {
     let client = reqwest::Client::new();
-    let req = EmbedRequest { input: text.to_string(), model: "text-embedding-3-small".to_string() };
+    let req = EmbedRequest {
+        input: text.to_string(),
+        model: "text-embedding-3-small".to_string(),
+    };
     let resp: EmbedResponse = client
         .post("https://api.openai.com/v1/embeddings")
         .bearer_auth(api_key)
@@ -272,7 +341,12 @@ struct RecordResponse {
 
 impl From<&IntentRecord> for RecordResponse {
     fn from(r: &IntentRecord) -> Self {
-        RecordResponse { id: r.id.clone(), text: r.text.clone(), tags: r.tags.clone(), timestamp: r.timestamp }
+        RecordResponse {
+            id: r.id.clone(),
+            text: r.text.clone(),
+            tags: r.tags.clone(),
+            timestamp: r.timestamp,
+        }
     }
 }
 
@@ -285,9 +359,7 @@ struct SearchQuery {
     tag: Vec<String>,
 }
 
-fn default_top() -> usize {
-    5
-}
+fn default_top() -> usize { 5 }
 
 #[derive(Serialize)]
 struct SearchResult {
@@ -299,59 +371,58 @@ struct SearchResult {
 }
 
 type AppError = (StatusCode, String);
-
 fn internal(e: anyhow::Error) -> AppError {
     (StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
 }
 
 // ─── HTTP ハンドラ ─────────────────────────────────────────────────────────
 
-// POST /records
 async fn handle_put(
     State(state): State<Arc<AppState>>,
     Json(body): Json<PutBody>,
 ) -> Result<Json<PutResponse>, AppError> {
-    // embeddingはロックの外で取得（ネットワーク待ちをロック中に行わない）
     let vector = get_embedding(&body.text, &state.api_key).await.map_err(internal)?;
     let id = uuid::Uuid::new_v4().to_string();
-    let timestamp = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_secs();
+    let timestamp = now_secs();
 
     let mut db = state.db.lock().await;
     db.index.insert(id.clone(), vector.clone());
-    db.records.push(IntentRecord { id: id.clone(), text: body.text.clone(), vector, timestamp, tags: body.tags.clone() });
+    db.records.push(IntentRecord {
+        id: id.clone(),
+        text: body.text.clone(),
+        vector,
+        timestamp,
+        tags: body.tags.clone(),
+    });
     let total = db.records.len();
     write_db(&state.db_path, &db.records).map_err(internal)?;
     db.index.save(&state.hnsw_path).map_err(internal)?;
-
     Ok(Json(PutResponse { id, text: body.text, tags: body.tags, total }))
 }
 
-// GET /records?tag=a&tag=b
 async fn handle_list(
     State(state): State<Arc<AppState>>,
     Query(filter): Query<TagFilter>,
 ) -> Result<Json<Vec<RecordResponse>>, AppError> {
     let db = state.db.lock().await;
-    let result = db.records.iter().filter(|r| matches_tags(r, &filter.tag)).map(RecordResponse::from).collect();
+    let result = db
+        .records
+        .iter()
+        .filter(|r| matches_tags(r, &filter.tag))
+        .map(RecordResponse::from)
+        .collect();
     Ok(Json(result))
 }
 
-// GET /search?q=...&top=5&tag=a
 async fn handle_search(
     State(state): State<Arc<AppState>>,
     Query(params): Query<SearchQuery>,
 ) -> Result<Json<Vec<SearchResult>>, AppError> {
     let query_vec = get_embedding(&params.q, &state.api_key).await.map_err(internal)?;
-
     let db = state.db.lock().await;
     let record_map: HashMap<&str, &IntentRecord> =
         db.records.iter().map(|r| (r.id.as_str(), r)).collect();
-
-    // HNSWで検索後、タグフィルタを適用
-    let raw = db.index.search(&query_vec, params.top * 4, 50); // タグフィルタ後に top 件残るよう多めに取る
+    let raw = db.index.search(&query_vec, params.top * 4, 50);
     let result: Vec<SearchResult> = raw
         .iter()
         .filter_map(|&(score, id)| record_map.get(id).map(|rec| (score, *rec)))
@@ -368,7 +439,6 @@ async fn handle_search(
     Ok(Json(result))
 }
 
-// DELETE /records/:id
 async fn handle_delete(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
@@ -377,16 +447,13 @@ async fn handle_delete(
     let before = db.records.len();
     db.records.retain(|r| !r.id.starts_with(&id));
     let deleted = before - db.records.len();
-
     if deleted == 0 {
         return Err((StatusCode::NOT_FOUND, format!("ID「{}」が見つかりません", id)));
     }
-
-    // HNSWインデックスを再構築
-    db.index = hnsw::Hnsw::build(db.records.iter().map(|r| (r.id.clone(), r.vector.clone())));
+    db.index =
+        hnsw::Hnsw::build(db.records.iter().map(|r| (r.id.clone(), r.vector.clone())));
     write_db(&state.db_path, &db.records).map_err(internal)?;
     db.index.save(&state.hnsw_path).map_err(internal)?;
-
     let remaining = db.records.len();
     Ok(Json(serde_json::json!({ "deleted": deleted, "remaining": remaining })))
 }
@@ -400,35 +467,31 @@ async fn main() -> Result<()> {
         .context("環境変数 OPENAI_API_KEY が設定されていません\n例: export OPENAI_API_KEY=sk-...")?;
 
     match cli.command {
+        // ── put ────────────────────────────────────────────────────────────
         Commands::Put { text, tags } => {
             println!("📥 embedding生成中...");
             let vector = get_embedding(&text, &api_key).await?;
             let id = uuid::Uuid::new_v4().to_string();
-            let timestamp =
-                std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_secs();
-
             let mut records = read_db(&cli.file)?;
             records.push(IntentRecord {
                 id: id.clone(),
                 text: text.clone(),
                 vector: vector.clone(),
-                timestamp,
+                timestamp: now_secs(),
                 tags: tags.clone(),
             });
             write_db(&cli.file, &records)?;
-
-            // HNSWインデックスに追記
             let hp = hnsw_path(&cli.file);
             let mut index = hnsw::Hnsw::load(&hp)?;
             if index.len() != records.len() - 1 {
-                // 不一致なら全件で再構築
                 index = hnsw::Hnsw::build(
-                    records[..records.len() - 1].iter().map(|r| (r.id.clone(), r.vector.clone())),
+                    records[..records.len() - 1]
+                        .iter()
+                        .map(|r| (r.id.clone(), r.vector.clone())),
                 );
             }
             index.insert(id.clone(), vector);
             index.save(&hp)?;
-
             println!("✅ 保存しました（合計 {} 件）", records.len());
             println!("   ID: {}", &id[..8]);
             println!("   テキスト: {}", text);
@@ -437,21 +500,49 @@ async fn main() -> Result<()> {
             }
         }
 
+        // ── update ─────────────────────────────────────────────────────────
+        Commands::Update { id, text, tags } => {
+            let mut records = read_db(&cli.file)?;
+            let target = records.iter().find(|r| r.id.starts_with(&id)).cloned();
+            let Some(old) = target else {
+                anyhow::bail!("ID「{}」に一致するレコードが見つかりませんでした", id);
+            };
+
+            println!("✏️  embedding再生成中...");
+            let vector = get_embedding(&text, &api_key).await?;
+
+            // タグ指定がなければ既存タグを維持
+            let new_tags = if tags.is_empty() { old.tags.clone() } else { tags };
+
+            if let Some(rec) = records.iter_mut().find(|r| r.id.starts_with(&id)) {
+                rec.text = text.clone();
+                rec.vector = vector;
+                rec.tags = new_tags.clone();
+                rec.timestamp = now_secs();
+            }
+            write_db(&cli.file, &records)?;
+            rebuild_and_save_hnsw(&cli.file, &records)?;
+
+            println!("✅ 更新しました");
+            println!("   ID: {}...", &old.id[..8]);
+            println!("   テキスト: {} → {}", old.text, text);
+            if !new_tags.is_empty() {
+                println!("   タグ: {}", new_tags.join(", "));
+            }
+        }
+
+        // ── search ─────────────────────────────────────────────────────────
         Commands::Search { query, top, tags } => {
             let records = read_db(&cli.file)?;
             if records.is_empty() {
                 println!("DBにデータがありません。まず `idb put \"テキスト\"` で追加してください。");
                 return Ok(());
             }
-
             println!("🔍 「{}」で検索中...", query);
             let query_vec = get_embedding(&query, &api_key).await?;
             let index = load_or_build_hnsw(&cli.file, &records)?;
-
             let record_map: HashMap<&str, &IntentRecord> =
                 records.iter().map(|r| (r.id.as_str(), r)).collect();
-
-            // タグフィルタ後に top 件残るよう多めに検索
             let raw = index.search(&query_vec, top * 4, 50);
             let scored: Vec<(f32, &IntentRecord)> = raw
                 .iter()
@@ -459,7 +550,6 @@ async fn main() -> Result<()> {
                 .filter(|(_, rec)| matches_tags(rec, &tags))
                 .take(top)
                 .collect();
-
             if !tags.is_empty() {
                 println!("   タグフィルタ: {}", tags.join(", "));
             }
@@ -473,6 +563,39 @@ async fn main() -> Result<()> {
             }
         }
 
+        // ── related ────────────────────────────────────────────────────────
+        Commands::Related { id, top } => {
+            let records = read_db(&cli.file)?;
+            let target = records
+                .iter()
+                .find(|r| r.id.starts_with(&id))
+                .ok_or_else(|| anyhow::anyhow!("ID「{}」に一致するレコードが見つかりません", id))?;
+
+            let index = load_or_build_hnsw(&cli.file, &records)?;
+            let record_map: HashMap<&str, &IntentRecord> =
+                records.iter().map(|r| (r.id.as_str(), r)).collect();
+
+            // top+1 件取得して自分自身を除外
+            let raw = index.search(&target.vector, top + 1, 50);
+            let related: Vec<(f32, &IntentRecord)> = raw
+                .iter()
+                .filter_map(|&(score, rid)| record_map.get(rid).map(|rec| (score, *rec)))
+                .filter(|(_, rec)| rec.id != target.id)
+                .take(top)
+                .collect();
+
+            println!("🔗 「{}」に関連するレコード（上位 {} 件）:", &target.id[..8], related.len());
+            println!("   起点: {}", target.text);
+            println!("{}", "─".repeat(50));
+            for (i, (score, rec)) in related.iter().enumerate() {
+                println!("{}. [類似度: {:.3}]{}", i + 1, score, format_tags(&rec.tags));
+                println!("   {}", rec.text);
+                println!("   ID: {}...", &rec.id[..8]);
+                println!();
+            }
+        }
+
+        // ── list ───────────────────────────────────────────────────────────
         Commands::List { tags } => {
             let records = read_db(&cli.file)?;
             if records.is_empty() {
@@ -488,10 +611,17 @@ async fn main() -> Result<()> {
             }
             println!("{}", "─".repeat(50));
             for (i, rec) in filtered.iter().enumerate() {
-                println!("{}. [{}...]{} {}", i + 1, &rec.id[..8], format_tags(&rec.tags), rec.text);
+                println!(
+                    "{}. [{}...]{} {}",
+                    i + 1,
+                    &rec.id[..8],
+                    format_tags(&rec.tags),
+                    rec.text
+                );
             }
         }
 
+        // ── delete ─────────────────────────────────────────────────────────
         Commands::Delete { id } => {
             let mut records = read_db(&cli.file)?;
             let before = records.len();
@@ -500,14 +630,215 @@ async fn main() -> Result<()> {
                 anyhow::bail!("ID「{}」に一致するレコードが見つかりませんでした", id);
             }
             write_db(&cli.file, &records)?;
-
-            // 削除後はHNSWを再構築
-            let hp = hnsw_path(&cli.file);
-            let index = hnsw::Hnsw::build(records.iter().map(|r| (r.id.clone(), r.vector.clone())));
-            index.save(&hp)?;
+            rebuild_and_save_hnsw(&cli.file, &records)?;
             println!("🗑️  削除しました（残り {} 件）", records.len());
         }
 
+        // ── import ─────────────────────────────────────────────────────────
+        Commands::Import { path, format } => {
+            let fmt = format
+                .unwrap_or_else(|| {
+                    path.extension()
+                        .and_then(|e| e.to_str())
+                        .unwrap_or("txt")
+                        .to_string()
+                })
+                .to_lowercase();
+
+            let entries: Vec<ImportEntry> = match fmt.as_str() {
+                "json" => {
+                    let s = std::fs::read_to_string(&path)
+                        .context("ファイルの読み込みに失敗しました")?;
+                    serde_json::from_str(&s).context("JSON形式が正しくありません")?
+                }
+                "csv" => {
+                    // CSVフォーマット: text列必須、tags列任意（カンマ区切りで複数可）
+                    let mut rdr = csv::Reader::from_path(&path)
+                        .context("CSVファイルの読み込みに失敗しました")?;
+                    let mut entries = Vec::new();
+                    for result in rdr.records() {
+                        let r = result?;
+                        let text = r.get(0).unwrap_or("").trim().to_string();
+                        if text.is_empty() {
+                            continue;
+                        }
+                        let tags: Vec<String> = r
+                            .get(1)
+                            .unwrap_or("")
+                            .split(',')
+                            .map(|s| s.trim().to_string())
+                            .filter(|s| !s.is_empty())
+                            .collect();
+                        entries.push(ImportEntry { text, tags });
+                    }
+                    entries
+                }
+                "txt" | _ => {
+                    // TXT: 1行1レコード、タグなし
+                    let s = std::fs::read_to_string(&path)
+                        .context("ファイルの読み込みに失敗しました")?;
+                    s.lines()
+                        .map(|l| l.trim().to_string())
+                        .filter(|l| !l.is_empty())
+                        .map(|text| ImportEntry { text, tags: vec![] })
+                        .collect()
+                }
+            };
+
+            if entries.is_empty() {
+                println!("インポートするデータがありません。");
+                return Ok(());
+            }
+
+            println!("📦 {} 件をインポート開始...", entries.len());
+            let mut records = read_db(&cli.file)?;
+            let hp = hnsw_path(&cli.file);
+            let mut index = load_or_build_hnsw(&cli.file, &records)?;
+            let mut added = 0usize;
+
+            for (i, entry) in entries.iter().enumerate() {
+                let vector = get_embedding(&entry.text, &api_key).await?;
+                let id = uuid::Uuid::new_v4().to_string();
+                index.insert(id.clone(), vector.clone());
+                records.push(IntentRecord {
+                    id,
+                    text: entry.text.clone(),
+                    vector,
+                    timestamp: now_secs(),
+                    tags: entry.tags.clone(),
+                });
+                added += 1;
+                if (i + 1) % 10 == 0 || i + 1 == entries.len() {
+                    print!("\r   {}/{} 件完了...", i + 1, entries.len());
+                    let _ = std::io::stdout().flush();
+                }
+            }
+            println!();
+            write_db(&cli.file, &records)?;
+            index.save(&hp)?;
+            println!("✅ {} 件インポートしました（合計 {} 件）", added, records.len());
+        }
+
+        // ── export ─────────────────────────────────────────────────────────
+        Commands::Export { output, format } => {
+            let records = read_db(&cli.file)?;
+            if records.is_empty() {
+                println!("DBにデータがありません。");
+                return Ok(());
+            }
+
+            let content = match format.to_lowercase().as_str() {
+                "csv" => {
+                    let mut out = String::from("id,text,tags,timestamp\n");
+                    for rec in &records {
+                        // CSVの特殊文字をエスケープ
+                        let text = rec.text.replace('"', "\"\"");
+                        let tags = rec.tags.join(",").replace('"', "\"\"");
+                        out.push_str(&format!(
+                            "\"{}\",\"{}\",\"{}\",{}\n",
+                            rec.id, text, tags, rec.timestamp
+                        ));
+                    }
+                    out
+                }
+                _ => {
+                    // json
+                    let entries: Vec<ExportEntry> = records
+                        .iter()
+                        .map(|r| ExportEntry {
+                            id: &r.id,
+                            text: &r.text,
+                            tags: &r.tags,
+                            timestamp: r.timestamp,
+                        })
+                        .collect();
+                    serde_json::to_string_pretty(&entries)?
+                }
+            };
+
+            if let Some(out_path) = output {
+                std::fs::write(&out_path, &content)?;
+                println!("✅ {} 件を {} にエクスポートしました", records.len(), out_path.display());
+            } else {
+                println!("{}", content);
+            }
+        }
+
+        // ── dedup ──────────────────────────────────────────────────────────
+        Commands::Dedup { threshold, delete } => {
+            let records = read_db(&cli.file)?;
+            if records.len() < 2 {
+                println!("レコードが2件未満です。");
+                return Ok(());
+            }
+
+            println!("🔎 重複検出中（閾値: {:.2}）...", threshold);
+            let index = load_or_build_hnsw(&cli.file, &records)?;
+            let id_to_idx: HashMap<&str, usize> =
+                records.iter().enumerate().map(|(i, r)| (r.id.as_str(), i)).collect();
+
+            let mut seen_pairs: HashSet<(usize, usize)> = HashSet::new();
+            let mut dup_pairs: Vec<(usize, usize, f32)> = Vec::new();
+
+            for rec in &records {
+                let raw = index.search(&rec.vector, 5, 20);
+                for &(score, neighbor_id) in &raw {
+                    if neighbor_id == rec.id.as_str() {
+                        continue;
+                    }
+                    if score < threshold {
+                        continue;
+                    }
+                    let i = id_to_idx[rec.id.as_str()];
+                    let j = id_to_idx[neighbor_id];
+                    let pair = (i.min(j), i.max(j));
+                    if seen_pairs.insert(pair) {
+                        dup_pairs.push((pair.0, pair.1, score));
+                    }
+                }
+            }
+
+            if dup_pairs.is_empty() {
+                println!("✅ 重複レコードは見つかりませんでした。");
+                return Ok(());
+            }
+
+            println!("\n⚠️  {} ペアの重複候補が見つかりました:", dup_pairs.len());
+            println!("{}", "─".repeat(50));
+            for (i, j, score) in &dup_pairs {
+                let a = &records[*i];
+                let b = &records[*j];
+                println!("[類似度: {:.3}]", score);
+                println!("  A [{}...] {}", &a.id[..8], a.text);
+                println!("  B [{}...] {}", &b.id[..8], b.text);
+                println!();
+            }
+
+            if delete {
+                // 各ペアでより新しいほう（大きいtimestamp）を削除
+                let to_delete: HashSet<usize> = dup_pairs
+                    .iter()
+                    .map(|&(i, j, _)| {
+                        if records[i].timestamp >= records[j].timestamp { i } else { j }
+                    })
+                    .collect();
+
+                let remaining: Vec<IntentRecord> = records
+                    .into_iter()
+                    .enumerate()
+                    .filter(|(i, _)| !to_delete.contains(i))
+                    .map(|(_, r)| r)
+                    .collect();
+
+                write_db(&cli.file, &remaining)?;
+                rebuild_and_save_hnsw(&cli.file, &remaining)?;
+                println!("🗑️  {} 件削除しました（残り {} 件）", to_delete.len(), remaining.len());
+            } else {
+                println!("削除するには --delete オプションを付けてください。");
+            }
+        }
+
+        // ── serve ──────────────────────────────────────────────────────────
         Commands::Serve { port } => {
             let records = read_db(&cli.file)?;
             let hp = hnsw_path(&cli.file);
