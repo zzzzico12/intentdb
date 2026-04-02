@@ -1,3 +1,5 @@
+mod hnsw;
+
 use anyhow::{Context, Result};
 use axum::{
     extract::{Path, Query, State},
@@ -9,6 +11,7 @@ use axum::{
 use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
 use clap::{Parser, Subcommand};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -20,10 +23,8 @@ use tokio::sync::Mutex;
 #[command(name = "idb")]
 #[command(about = "IntentDB - スキーマ不要・自然言語で使えるDB")]
 struct Cli {
-    /// DBファイルのパス
     #[arg(short, long, default_value = "data.idb")]
     file: PathBuf,
-
     #[command(subcommand)]
     command: Commands,
 }
@@ -36,7 +37,7 @@ enum Commands {
         #[arg(short, long = "tag")]
         tags: Vec<String>,
     },
-    /// 自然言語で検索する
+    /// 自然言語で検索する（HNSWインデックス使用）
     Search {
         query: String,
         #[arg(short, long, default_value = "5")]
@@ -78,8 +79,6 @@ struct IntentRecord {
 //   [vector次元数: u32][f32 x N]
 //   [timestamp: u64]
 //   [tags数: u16][[tagの長さ: u16][tag bytes] x tags数]
-//
-// IDB1との差分: tagsフィールドが追加。IDB1読み込み時はtags=[]として扱う。
 
 const MAGIC_V2: &[u8; 4] = b"IDB2";
 const MAGIC_V1: &[u8; 4] = b"IDB1";
@@ -88,28 +87,23 @@ fn write_db(path: &PathBuf, records: &[IntentRecord]) -> Result<()> {
     let mut f = std::fs::File::create(path)?;
     f.write_all(MAGIC_V2)?;
     f.write_u32::<LittleEndian>(records.len() as u32)?;
-
     for rec in records {
-        let id_bytes = rec.id.as_bytes();
-        f.write_u16::<LittleEndian>(id_bytes.len() as u16)?;
-        f.write_all(id_bytes)?;
-
-        let text_bytes = rec.text.as_bytes();
-        f.write_u32::<LittleEndian>(text_bytes.len() as u32)?;
-        f.write_all(text_bytes)?;
-
+        let id_b = rec.id.as_bytes();
+        f.write_u16::<LittleEndian>(id_b.len() as u16)?;
+        f.write_all(id_b)?;
+        let text_b = rec.text.as_bytes();
+        f.write_u32::<LittleEndian>(text_b.len() as u32)?;
+        f.write_all(text_b)?;
         f.write_u32::<LittleEndian>(rec.vector.len() as u32)?;
         for &v in &rec.vector {
             f.write_f32::<LittleEndian>(v)?;
         }
-
         f.write_u64::<LittleEndian>(rec.timestamp)?;
-
         f.write_u16::<LittleEndian>(rec.tags.len() as u16)?;
         for tag in &rec.tags {
-            let tag_bytes = tag.as_bytes();
-            f.write_u16::<LittleEndian>(tag_bytes.len() as u16)?;
-            f.write_all(tag_bytes)?;
+            let tb = tag.as_bytes();
+            f.write_u16::<LittleEndian>(tb.len() as u16)?;
+            f.write_all(tb)?;
         }
     }
     Ok(())
@@ -120,7 +114,6 @@ fn read_db(path: &PathBuf) -> Result<Vec<IntentRecord>> {
         return Ok(vec![]);
     }
     let mut f = std::fs::File::open(path)?;
-
     let mut magic = [0u8; 4];
     f.read_exact(&mut magic)?;
     let has_tags = if &magic == MAGIC_V2 {
@@ -130,46 +123,60 @@ fn read_db(path: &PathBuf) -> Result<Vec<IntentRecord>> {
     } else {
         anyhow::bail!("不正なファイル形式です（マジックバイト不一致）");
     };
-
     let count = f.read_u32::<LittleEndian>()? as usize;
     let mut records = Vec::with_capacity(count);
-
     for _ in 0..count {
         let id_len = f.read_u16::<LittleEndian>()? as usize;
-        let mut id_bytes = vec![0u8; id_len];
-        f.read_exact(&mut id_bytes)?;
-        let id = String::from_utf8(id_bytes)?;
-
+        let mut id_b = vec![0u8; id_len];
+        f.read_exact(&mut id_b)?;
+        let id = String::from_utf8(id_b)?;
         let text_len = f.read_u32::<LittleEndian>()? as usize;
-        let mut text_bytes = vec![0u8; text_len];
-        f.read_exact(&mut text_bytes)?;
-        let text = String::from_utf8(text_bytes)?;
-
+        let mut text_b = vec![0u8; text_len];
+        f.read_exact(&mut text_b)?;
+        let text = String::from_utf8(text_b)?;
         let dim = f.read_u32::<LittleEndian>()? as usize;
         let mut vector = Vec::with_capacity(dim);
         for _ in 0..dim {
             vector.push(f.read_f32::<LittleEndian>()?);
         }
-
         let timestamp = f.read_u64::<LittleEndian>()?;
-
         let tags = if has_tags {
-            let tag_count = f.read_u16::<LittleEndian>()? as usize;
-            let mut tags = Vec::with_capacity(tag_count);
-            for _ in 0..tag_count {
-                let tag_len = f.read_u16::<LittleEndian>()? as usize;
-                let mut tag_bytes = vec![0u8; tag_len];
-                f.read_exact(&mut tag_bytes)?;
-                tags.push(String::from_utf8(tag_bytes)?);
+            let tc = f.read_u16::<LittleEndian>()? as usize;
+            let mut tags = Vec::with_capacity(tc);
+            for _ in 0..tc {
+                let tl = f.read_u16::<LittleEndian>()? as usize;
+                let mut tb = vec![0u8; tl];
+                f.read_exact(&mut tb)?;
+                tags.push(String::from_utf8(tb)?);
             }
             tags
         } else {
             vec![]
         };
-
         records.push(IntentRecord { id, text, vector, timestamp, tags });
     }
     Ok(records)
+}
+
+// ─── HNSWヘルパー ─────────────────────────────────────────────────────────
+
+fn hnsw_path(db_path: &PathBuf) -> PathBuf {
+    db_path.with_extension("hnsw")
+}
+
+/// HNSWインデックスを読み込む。存在しないまたは件数不一致なら再構築して保存。
+fn load_or_build_hnsw(db_path: &PathBuf, records: &[IntentRecord]) -> Result<hnsw::Hnsw> {
+    let hp = hnsw_path(db_path);
+    let index = hnsw::Hnsw::load(&hp)?;
+    if index.len() == records.len() {
+        return Ok(index);
+    }
+    if !records.is_empty() {
+        eprintln!("🔧 インデックスを構築中 ({} 件)...", records.len());
+    }
+    let index = hnsw::Hnsw::build(records.iter().map(|r| (r.id.clone(), r.vector.clone())));
+    index.save(&hp)?;
+    Ok(index)
 }
 
 // ─── タグフィルタ ──────────────────────────────────────────────────────────
@@ -206,10 +213,7 @@ struct EmbedData {
 
 async fn get_embedding(text: &str, api_key: &str) -> Result<Vec<f32>> {
     let client = reqwest::Client::new();
-    let req = EmbedRequest {
-        input: text.to_string(),
-        model: "text-embedding-3-small".to_string(),
-    };
+    let req = EmbedRequest { input: text.to_string(), model: "text-embedding-3-small".to_string() };
     let resp: EmbedResponse = client
         .post("https://api.openai.com/v1/embeddings")
         .bearer_auth(api_key)
@@ -223,24 +227,18 @@ async fn get_embedding(text: &str, api_key: &str) -> Result<Vec<f32>> {
     Ok(resp.data.into_iter().next().unwrap().embedding)
 }
 
-// ─── コサイン類似度 ────────────────────────────────────────────────────────
-
-fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
-    let dot: f32 = a.iter().zip(b.iter()).map(|(x, y)| x * y).sum();
-    let norm_a: f32 = a.iter().map(|x| x * x).sum::<f32>().sqrt();
-    let norm_b: f32 = b.iter().map(|x| x * x).sum::<f32>().sqrt();
-    if norm_a == 0.0 || norm_b == 0.0 {
-        return 0.0;
-    }
-    dot / (norm_a * norm_b)
-}
-
 // ─── HTTP APIのState・型定義 ───────────────────────────────────────────────
+
+struct DbState {
+    records: Vec<IntentRecord>,
+    index: hnsw::Hnsw,
+}
 
 struct AppState {
     db_path: PathBuf,
+    hnsw_path: PathBuf,
     api_key: String,
-    lock: Mutex<()>,
+    db: Mutex<DbState>,
 }
 
 #[derive(Deserialize)]
@@ -274,12 +272,7 @@ struct RecordResponse {
 
 impl From<&IntentRecord> for RecordResponse {
     fn from(r: &IntentRecord) -> Self {
-        RecordResponse {
-            id: r.id.clone(),
-            text: r.text.clone(),
-            tags: r.tags.clone(),
-            timestamp: r.timestamp,
-        }
+        RecordResponse { id: r.id.clone(), text: r.text.clone(), tags: r.tags.clone(), timestamp: r.timestamp }
     }
 }
 
@@ -318,6 +311,7 @@ async fn handle_put(
     State(state): State<Arc<AppState>>,
     Json(body): Json<PutBody>,
 ) -> Result<Json<PutResponse>, AppError> {
+    // embeddingはロックの外で取得（ネットワーク待ちをロック中に行わない）
     let vector = get_embedding(&body.text, &state.api_key).await.map_err(internal)?;
     let id = uuid::Uuid::new_v4().to_string();
     let timestamp = std::time::SystemTime::now()
@@ -325,17 +319,12 @@ async fn handle_put(
         .unwrap()
         .as_secs();
 
-    let _guard = state.lock.lock().await;
-    let mut records = read_db(&state.db_path).map_err(internal)?;
-    records.push(IntentRecord {
-        id: id.clone(),
-        text: body.text.clone(),
-        vector,
-        timestamp,
-        tags: body.tags.clone(),
-    });
-    let total = records.len();
-    write_db(&state.db_path, &records).map_err(internal)?;
+    let mut db = state.db.lock().await;
+    db.index.insert(id.clone(), vector.clone());
+    db.records.push(IntentRecord { id: id.clone(), text: body.text.clone(), vector, timestamp, tags: body.tags.clone() });
+    let total = db.records.len();
+    write_db(&state.db_path, &db.records).map_err(internal)?;
+    db.index.save(&state.hnsw_path).map_err(internal)?;
 
     Ok(Json(PutResponse { id, text: body.text, tags: body.tags, total }))
 }
@@ -345,13 +334,8 @@ async fn handle_list(
     State(state): State<Arc<AppState>>,
     Query(filter): Query<TagFilter>,
 ) -> Result<Json<Vec<RecordResponse>>, AppError> {
-    let _guard = state.lock.lock().await;
-    let records = read_db(&state.db_path).map_err(internal)?;
-    let result = records
-        .iter()
-        .filter(|r| matches_tags(r, &filter.tag))
-        .map(RecordResponse::from)
-        .collect();
+    let db = state.db.lock().await;
+    let result = db.records.iter().filter(|r| matches_tags(r, &filter.tag)).map(RecordResponse::from).collect();
     Ok(Json(result))
 }
 
@@ -362,25 +346,23 @@ async fn handle_search(
 ) -> Result<Json<Vec<SearchResult>>, AppError> {
     let query_vec = get_embedding(&params.q, &state.api_key).await.map_err(internal)?;
 
-    let _guard = state.lock.lock().await;
-    let records = read_db(&state.db_path).map_err(internal)?;
+    let db = state.db.lock().await;
+    let record_map: HashMap<&str, &IntentRecord> =
+        db.records.iter().map(|r| (r.id.as_str(), r)).collect();
 
-    let mut scored: Vec<(f32, &IntentRecord)> = records
+    // HNSWで検索後、タグフィルタを適用
+    let raw = db.index.search(&query_vec, params.top * 4, 50); // タグフィルタ後に top 件残るよう多めに取る
+    let result: Vec<SearchResult> = raw
         .iter()
-        .filter(|r| matches_tags(r, &params.tag))
-        .map(|r| (cosine_similarity(&query_vec, &r.vector), r))
-        .collect();
-    scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap());
-
-    let result = scored
-        .iter()
+        .filter_map(|&(score, id)| record_map.get(id).map(|rec| (score, *rec)))
+        .filter(|(_, rec)| matches_tags(rec, &params.tag))
         .take(params.top)
-        .map(|(score, r)| SearchResult {
-            score: *score,
-            id: r.id.clone(),
-            text: r.text.clone(),
-            tags: r.tags.clone(),
-            timestamp: r.timestamp,
+        .map(|(score, rec)| SearchResult {
+            score,
+            id: rec.id.clone(),
+            text: rec.text.clone(),
+            tags: rec.tags.clone(),
+            timestamp: rec.timestamp,
         })
         .collect();
     Ok(Json(result))
@@ -391,19 +373,22 @@ async fn handle_delete(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    let _guard = state.lock.lock().await;
-    let records = read_db(&state.db_path).map_err(internal)?;
-    let before = records.len();
-    let remaining: Vec<IntentRecord> =
-        records.into_iter().filter(|r| !r.id.starts_with(&id)).collect();
+    let mut db = state.db.lock().await;
+    let before = db.records.len();
+    db.records.retain(|r| !r.id.starts_with(&id));
+    let deleted = before - db.records.len();
 
-    if remaining.len() == before {
+    if deleted == 0 {
         return Err((StatusCode::NOT_FOUND, format!("ID「{}」が見つかりません", id)));
     }
 
-    let deleted = before - remaining.len();
-    write_db(&state.db_path, &remaining).map_err(internal)?;
-    Ok(Json(serde_json::json!({ "deleted": deleted, "remaining": remaining.len() })))
+    // HNSWインデックスを再構築
+    db.index = hnsw::Hnsw::build(db.records.iter().map(|r| (r.id.clone(), r.vector.clone())));
+    write_db(&state.db_path, &db.records).map_err(internal)?;
+    db.index.save(&state.hnsw_path).map_err(internal)?;
+
+    let remaining = db.records.len();
+    Ok(Json(serde_json::json!({ "deleted": deleted, "remaining": remaining })))
 }
 
 // ─── メイン ────────────────────────────────────────────────────────────────
@@ -411,7 +396,6 @@ async fn handle_delete(
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
-
     let api_key = std::env::var("OPENAI_API_KEY")
         .context("環境変数 OPENAI_API_KEY が設定されていません\n例: export OPENAI_API_KEY=sk-...")?;
 
@@ -419,13 +403,32 @@ async fn main() -> Result<()> {
         Commands::Put { text, tags } => {
             println!("📥 embedding生成中...");
             let vector = get_embedding(&text, &api_key).await?;
-            let mut records = read_db(&cli.file)?;
             let id = uuid::Uuid::new_v4().to_string();
-            let timestamp = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)?
-                .as_secs();
-            records.push(IntentRecord { id: id.clone(), text: text.clone(), vector, timestamp, tags: tags.clone() });
+            let timestamp =
+                std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_secs();
+
+            let mut records = read_db(&cli.file)?;
+            records.push(IntentRecord {
+                id: id.clone(),
+                text: text.clone(),
+                vector: vector.clone(),
+                timestamp,
+                tags: tags.clone(),
+            });
             write_db(&cli.file, &records)?;
+
+            // HNSWインデックスに追記
+            let hp = hnsw_path(&cli.file);
+            let mut index = hnsw::Hnsw::load(&hp)?;
+            if index.len() != records.len() - 1 {
+                // 不一致なら全件で再構築
+                index = hnsw::Hnsw::build(
+                    records[..records.len() - 1].iter().map(|r| (r.id.clone(), r.vector.clone())),
+                );
+            }
+            index.insert(id.clone(), vector);
+            index.save(&hp)?;
+
             println!("✅ 保存しました（合計 {} 件）", records.len());
             println!("   ID: {}", &id[..8]);
             println!("   テキスト: {}", text);
@@ -440,20 +443,29 @@ async fn main() -> Result<()> {
                 println!("DBにデータがありません。まず `idb put \"テキスト\"` で追加してください。");
                 return Ok(());
             }
+
             println!("🔍 「{}」で検索中...", query);
             let query_vec = get_embedding(&query, &api_key).await?;
-            let mut scored: Vec<(f32, &IntentRecord)> = records
+            let index = load_or_build_hnsw(&cli.file, &records)?;
+
+            let record_map: HashMap<&str, &IntentRecord> =
+                records.iter().map(|r| (r.id.as_str(), r)).collect();
+
+            // タグフィルタ後に top 件残るよう多めに検索
+            let raw = index.search(&query_vec, top * 4, 50);
+            let scored: Vec<(f32, &IntentRecord)> = raw
                 .iter()
-                .filter(|rec| matches_tags(rec, &tags))
-                .map(|rec| (cosine_similarity(&query_vec, &rec.vector), rec))
+                .filter_map(|&(score, id)| record_map.get(id).map(|rec| (score, *rec)))
+                .filter(|(_, rec)| matches_tags(rec, &tags))
+                .take(top)
                 .collect();
-            scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap());
+
             if !tags.is_empty() {
                 println!("   タグフィルタ: {}", tags.join(", "));
             }
-            println!("\n結果（上位 {} 件）:", top.min(scored.len()));
+            println!("\n結果（上位 {} 件）:", scored.len());
             println!("{}", "─".repeat(50));
-            for (i, (score, rec)) in scored.iter().take(top).enumerate() {
+            for (i, (score, rec)) in scored.iter().enumerate() {
                 println!("{}. [スコア: {:.3}]{}", i + 1, score, format_tags(&rec.tags));
                 println!("   {}", rec.text);
                 println!("   ID: {}...", &rec.id[..8]);
@@ -481,22 +493,31 @@ async fn main() -> Result<()> {
         }
 
         Commands::Delete { id } => {
-            let records = read_db(&cli.file)?;
+            let mut records = read_db(&cli.file)?;
             let before = records.len();
-            let remaining: Vec<IntentRecord> =
-                records.into_iter().filter(|rec| !rec.id.starts_with(&id)).collect();
-            if remaining.len() == before {
+            records.retain(|r| !r.id.starts_with(&id));
+            if records.len() == before {
                 anyhow::bail!("ID「{}」に一致するレコードが見つかりませんでした", id);
             }
-            write_db(&cli.file, &remaining)?;
-            println!("🗑️  削除しました（残り {} 件）", remaining.len());
+            write_db(&cli.file, &records)?;
+
+            // 削除後はHNSWを再構築
+            let hp = hnsw_path(&cli.file);
+            let index = hnsw::Hnsw::build(records.iter().map(|r| (r.id.clone(), r.vector.clone())));
+            index.save(&hp)?;
+            println!("🗑️  削除しました（残り {} 件）", records.len());
         }
 
         Commands::Serve { port } => {
+            let records = read_db(&cli.file)?;
+            let hp = hnsw_path(&cli.file);
+            let index = load_or_build_hnsw(&cli.file, &records)?;
+
             let state = Arc::new(AppState {
                 db_path: cli.file.clone(),
+                hnsw_path: hp,
                 api_key,
-                lock: Mutex::new(()),
+                db: Mutex::new(DbState { records, index }),
             });
 
             let app = Router::new()
