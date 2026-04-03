@@ -1,3 +1,4 @@
 /target
 *.idb
 .env
+.DS_Store
