@@ -105,6 +105,7 @@ impl Hnsw {
         self.nodes.len()
     }
 
+    #[allow(dead_code)]
     pub fn is_empty(&self) -> bool {
         self.nodes.is_empty()
     }

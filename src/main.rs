@@ -359,7 +359,34 @@ struct SearchQuery {
     tag: Vec<String>,
 }
 
+#[derive(Deserialize)]
+struct RelatedQuery {
+    #[serde(default = "default_top")]
+    top: usize,
+}
+
+#[derive(Deserialize)]
+struct DedupQuery {
+    #[serde(default = "default_threshold")]
+    threshold: f32,
+}
+
 fn default_top() -> usize { 5 }
+fn default_threshold() -> f32 { 0.95 }
+
+#[derive(Serialize)]
+struct DedupPair {
+    score: f32,
+    a: RecordResponse,
+    b: RecordResponse,
+}
+
+#[derive(Deserialize)]
+struct UpdateBody {
+    text: String,
+    #[serde(default)]
+    tags: Vec<String>,
+}
 
 #[derive(Serialize)]
 struct SearchResult {
@@ -456,6 +483,98 @@ async fn handle_delete(
     db.index.save(&state.hnsw_path).map_err(internal)?;
     let remaining = db.records.len();
     Ok(Json(serde_json::json!({ "deleted": deleted, "remaining": remaining })))
+}
+
+// PATCH /records/:id
+async fn handle_update(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(body): Json<UpdateBody>,
+) -> Result<Json<RecordResponse>, AppError> {
+    let vector = get_embedding(&body.text, &state.api_key).await.map_err(internal)?;
+
+    let mut db = state.db.lock().await;
+    let rec = db.records.iter_mut().find(|r| r.id.starts_with(&id))
+        .ok_or_else(|| (StatusCode::NOT_FOUND, format!("ID「{}」が見つかりません", id)))?;
+
+    rec.text = body.text.clone();
+    rec.vector = vector;
+    if !body.tags.is_empty() {
+        rec.tags = body.tags.clone();
+    }
+    rec.timestamp = now_secs();
+    let response = RecordResponse::from(&*rec);
+
+    db.index = hnsw::Hnsw::build(db.records.iter().map(|r| (r.id.clone(), r.vector.clone())));
+    write_db(&state.db_path, &db.records).map_err(internal)?;
+    db.index.save(&state.hnsw_path).map_err(internal)?;
+    Ok(Json(response))
+}
+
+// GET /records/:id/related?top=5
+async fn handle_related(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Query(params): Query<RelatedQuery>,
+) -> Result<Json<Vec<SearchResult>>, AppError> {
+    let db = state.db.lock().await;
+    let target = db.records.iter().find(|r| r.id.starts_with(&id))
+        .ok_or_else(|| (StatusCode::NOT_FOUND, format!("ID「{}」が見つかりません", id)))?;
+
+    let target_vec = target.vector.clone();
+    let target_id = target.id.clone();
+    let record_map: HashMap<&str, &IntentRecord> =
+        db.records.iter().map(|r| (r.id.as_str(), r)).collect();
+
+    let raw = db.index.search(&target_vec, params.top + 1, 50);
+    let result: Vec<SearchResult> = raw
+        .iter()
+        .filter_map(|&(score, rid)| record_map.get(rid).map(|rec| (score, *rec)))
+        .filter(|(_, rec)| rec.id != target_id)
+        .take(params.top)
+        .map(|(score, rec)| SearchResult {
+            score,
+            id: rec.id.clone(),
+            text: rec.text.clone(),
+            tags: rec.tags.clone(),
+            timestamp: rec.timestamp,
+        })
+        .collect();
+    Ok(Json(result))
+}
+
+// GET /dedup?threshold=0.95
+async fn handle_dedup(
+    State(state): State<Arc<AppState>>,
+    Query(params): Query<DedupQuery>,
+) -> Result<Json<Vec<DedupPair>>, AppError> {
+    let db = state.db.lock().await;
+    let id_to_idx: HashMap<&str, usize> =
+        db.records.iter().enumerate().map(|(i, r)| (r.id.as_str(), i)).collect();
+
+    let mut seen_pairs: HashSet<(usize, usize)> = HashSet::new();
+    let mut pairs: Vec<DedupPair> = Vec::new();
+
+    for rec in &db.records {
+        let raw = db.index.search(&rec.vector, 5, 20);
+        for &(score, neighbor_id) in &raw {
+            if neighbor_id == rec.id.as_str() || score < params.threshold {
+                continue;
+            }
+            let i = id_to_idx[rec.id.as_str()];
+            let j = id_to_idx[neighbor_id];
+            let pair = (i.min(j), i.max(j));
+            if seen_pairs.insert(pair) {
+                pairs.push(DedupPair {
+                    score,
+                    a: RecordResponse::from(&db.records[pair.0]),
+                    b: RecordResponse::from(&db.records[pair.1]),
+                });
+            }
+        }
+    }
+    pairs.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+    Ok(Json(pairs))
 }
 
 // ─── メイン ────────────────────────────────────────────────────────────────
@@ -855,7 +974,10 @@ async fn main() -> Result<()> {
                 .route("/records", post(handle_put))
                 .route("/records", get(handle_list))
                 .route("/records/:id", delete(handle_delete))
+                .route("/records/:id", axum::routing::patch(handle_update))
+                .route("/records/:id/related", get(handle_related))
                 .route("/search", get(handle_search))
+                .route("/dedup", get(handle_dedup))
                 .with_state(state);
 
             let addr = format!("0.0.0.0:{}", port);
@@ -865,10 +987,13 @@ async fn main() -> Result<()> {
             println!("   DBファイル: {}", cli.file.display());
             println!();
             println!("エンドポイント:");
-            println!("  POST   /records          レコード追加");
-            println!("  GET    /records           全件取得 (?tag=xxx)");
-            println!("  GET    /search            検索 (?q=xxx&top=5&tag=xxx)");
-            println!("  DELETE /records/:id       削除");
+            println!("  POST   /records              レコード追加");
+            println!("  GET    /records              全件取得 (?tag=xxx)");
+            println!("  PATCH  /records/:id          更新");
+            println!("  DELETE /records/:id          削除");
+            println!("  GET    /records/:id/related  関連レコード (?top=5)");
+            println!("  GET    /search               検索 (?q=xxx&top=5&tag=xxx)");
+            println!("  GET    /dedup                重複検出 (?threshold=0.95)");
             axum::serve(listener, app).await?;
         }
     }

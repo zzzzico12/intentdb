@@ -2,6 +2,7 @@
 
 > A schema-free, intent-native storage engine. Put data in plain language. Search in plain language.
 
+[![CI](https://img.shields.io/github/actions/workflow/status/zzzzico12/intentdb/ci.yml?style=flat-square)](https://github.com/zzzzico12/intentdb/actions)
 [![crates.io](https://img.shields.io/crates/v/intentdb?style=flat-square)](https://crates.io/crates/intentdb)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue?style=flat-square)](LICENSE)
 
@@ -132,9 +133,44 @@ curl "http://localhost:3000/search?q=bugs&top=5&tag=urgent"
 curl "http://localhost:3000/records"
 curl "http://localhost:3000/records?tag=sales"
 
+# Update
+curl -X PATCH http://localhost:3000/records/<id> \
+  -H "Content-Type: application/json" \
+  -d '{"text": "Updated text"}'
+
 # Delete
 curl -X DELETE http://localhost:3000/records/<id>
+
+# Related records
+curl "http://localhost:3000/records/<id>/related?top=5"
+
+# Duplicate detection
+curl "http://localhost:3000/dedup?threshold=0.95"
 ```
+
+### Python client
+
+```python
+# No dependencies — stdlib only
+from intentdb import Client
+
+db = Client("http://localhost:3000")
+
+db.put("Alice closed a $50k deal on Friday", tags=["sales"])
+db.put("Bob's server went down at 2am", tags=["incident"])
+
+results = db.search("recent problems", top=3)
+for r in results:
+    print(f"[{r['score']:.3f}] {r['text']}")
+
+# Related records
+related = db.related("<id>", top=5)
+
+# Duplicate detection
+pairs = db.dedup(threshold=0.95)
+```
+
+Copy [python/intentdb.py](python/intentdb.py) into your project — no pip install needed (stdlib only).
 
 ---
 
@@ -213,8 +249,8 @@ Estimated on Apple M2, 1536-dim vectors (OpenAI `text-embedding-3-small`), M=16,
 - [x] Duplicate detection
 - [x] Related record discovery
 - [x] `cargo install intentdb` on crates.io
-- [ ] Python client (`intentdb-py`)
-- [ ] Docker image
+- [x] Python client (`python/intentdb.py`, stdlib only)
+- [x] Docker image
 - [ ] Multi-device sync
 - [ ] Web UI
 
