@@ -99,6 +99,9 @@ enum Commands {
     Serve {
         #[arg(short, long, default_value = "3000")]
         port: u16,
+        /// バインドするホスト（デフォルト: 127.0.0.1）
+        #[arg(long, default_value = "127.0.0.1")]
+        host: String,
     },
 }
 
@@ -134,6 +137,17 @@ struct ExportEntry<'a> {
 
 const MAGIC_V2: &[u8; 4] = b"IDB2";
 const MAGIC_V1: &[u8; 4] = b"IDB1";
+
+// read_db での単一フィールドの最大サイズ（破損・細工ファイルによるOOM防止）
+const MAX_TEXT_BYTES: usize = 10 * 1024 * 1024; // 10MB
+const MAX_VECTOR_DIM: usize = 16_384;            // 最大16384次元
+const MAX_TAG_COUNT: usize = 1_024;
+const MAX_TAG_BYTES: usize = 4_096;
+const MAX_RECORDS: usize = 10_000_000;           // 1000万件
+// HTTP API 入力制限
+const MAX_INPUT_TEXT: usize = 32_768;            // 32KB（OpenAI制限は約300KB相当だが実用的な上限）
+const MAX_TAG_INPUT: usize = 256;
+const MAX_TAGS_COUNT: usize = 64;
 
 fn write_db(path: &PathBuf, records: &[IntentRecord]) -> Result<()> {
     let mut f = std::fs::File::create(path)?;
@@ -176,27 +190,35 @@ fn read_db(path: &PathBuf) -> Result<Vec<IntentRecord>> {
         anyhow::bail!("invalid file format (magic bytes mismatch)");
     };
     let count = f.read_u32::<LittleEndian>()? as usize;
-    let mut records = Vec::with_capacity(count);
+    anyhow::ensure!(count <= MAX_RECORDS, "record count too large: {}", count);
+    let mut records = Vec::with_capacity(count.min(4096));
     for _ in 0..count {
         let id_len = f.read_u16::<LittleEndian>()? as usize;
         let mut id_b = vec![0u8; id_len];
         f.read_exact(&mut id_b)?;
         let id = String::from_utf8(id_b)?;
+
         let text_len = f.read_u32::<LittleEndian>()? as usize;
+        anyhow::ensure!(text_len <= MAX_TEXT_BYTES, "text field too large: {} bytes", text_len);
         let mut text_b = vec![0u8; text_len];
         f.read_exact(&mut text_b)?;
         let text = String::from_utf8(text_b)?;
+
         let dim = f.read_u32::<LittleEndian>()? as usize;
+        anyhow::ensure!(dim <= MAX_VECTOR_DIM, "vector dimension too large: {}", dim);
         let mut vector = Vec::with_capacity(dim);
         for _ in 0..dim {
             vector.push(f.read_f32::<LittleEndian>()?);
         }
+
         let timestamp = f.read_u64::<LittleEndian>()?;
         let tags = if has_tags {
             let tc = f.read_u16::<LittleEndian>()? as usize;
+            anyhow::ensure!(tc <= MAX_TAG_COUNT, "tag count too large: {}", tc);
             let mut tags = Vec::with_capacity(tc);
             for _ in 0..tc {
                 let tl = f.read_u16::<LittleEndian>()? as usize;
+                anyhow::ensure!(tl <= MAX_TAG_BYTES, "tag too large: {} bytes", tl);
                 let mut tb = vec![0u8; tl];
                 f.read_exact(&mut tb)?;
                 tags.push(String::from_utf8(tb)?);
@@ -293,7 +315,9 @@ async fn get_embedding(text: &str, api_key: &str) -> Result<Vec<f32>> {
         .json()
         .await
         .context("failed to parse OpenAI API response")?;
-    Ok(resp.data.into_iter().next().unwrap().embedding)
+    resp.data.into_iter().next()
+        .ok_or_else(|| anyhow::anyhow!("OpenAI returned empty embedding data"))
+        .map(|d| d.embedding)
 }
 
 // ─── HTTP APIのState・型定義 ───────────────────────────────────────────────
@@ -399,15 +423,41 @@ struct SearchResult {
 
 type AppError = (StatusCode, String);
 fn internal(e: anyhow::Error) -> AppError {
-    (StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
+    // 内部エラーの詳細は外部に露出しない
+    eprintln!("internal error: {:#}", e);
+    (StatusCode::INTERNAL_SERVER_ERROR, "internal server error".to_string())
 }
 
 // ─── HTTP ハンドラ ─────────────────────────────────────────────────────────
+
+fn validate_text(text: &str) -> Result<(), AppError> {
+    if text.is_empty() {
+        return Err((StatusCode::BAD_REQUEST, "text must not be empty".to_string()));
+    }
+    if text.len() > MAX_INPUT_TEXT {
+        return Err((StatusCode::BAD_REQUEST, format!("text too long (max {} bytes)", MAX_INPUT_TEXT)));
+    }
+    Ok(())
+}
+
+fn validate_tags(tags: &[String]) -> Result<(), AppError> {
+    if tags.len() > MAX_TAGS_COUNT {
+        return Err((StatusCode::BAD_REQUEST, format!("too many tags (max {})", MAX_TAGS_COUNT)));
+    }
+    for tag in tags {
+        if tag.len() > MAX_TAG_INPUT {
+            return Err((StatusCode::BAD_REQUEST, format!("tag too long (max {} bytes)", MAX_TAG_INPUT)));
+        }
+    }
+    Ok(())
+}
 
 async fn handle_put(
     State(state): State<Arc<AppState>>,
     Json(body): Json<PutBody>,
 ) -> Result<Json<PutResponse>, AppError> {
+    validate_text(&body.text)?;
+    validate_tags(&body.tags)?;
     let vector = get_embedding(&body.text, &state.api_key).await.map_err(internal)?;
     let id = uuid::Uuid::new_v4().to_string();
     let timestamp = now_secs();
@@ -445,6 +495,10 @@ async fn handle_search(
     State(state): State<Arc<AppState>>,
     Query(params): Query<SearchQuery>,
 ) -> Result<Json<Vec<SearchResult>>, AppError> {
+    validate_text(&params.q)?;
+    if params.top == 0 || params.top > 100 {
+        return Err((StatusCode::BAD_REQUEST, "top must be between 1 and 100".to_string()));
+    }
     let query_vec = get_embedding(&params.q, &state.api_key).await.map_err(internal)?;
     let db = state.db.lock().await;
     let record_map: HashMap<&str, &IntentRecord> =
@@ -491,6 +545,8 @@ async fn handle_update(
     Path(id): Path<String>,
     Json(body): Json<UpdateBody>,
 ) -> Result<Json<RecordResponse>, AppError> {
+    validate_text(&body.text)?;
+    validate_tags(&body.tags)?;
     let vector = get_embedding(&body.text, &state.api_key).await.map_err(internal)?;
 
     let mut db = state.db.lock().await;
@@ -517,6 +573,9 @@ async fn handle_related(
     Path(id): Path<String>,
     Query(params): Query<RelatedQuery>,
 ) -> Result<Json<Vec<SearchResult>>, AppError> {
+    if params.top == 0 || params.top > 100 {
+        return Err((StatusCode::BAD_REQUEST, "top must be between 1 and 100".to_string()));
+    }
     let db = state.db.lock().await;
     let target = db.records.iter().find(|r| r.id.starts_with(&id))
         .ok_or_else(|| (StatusCode::NOT_FOUND, format!("record not found: {}", id)))?;
@@ -548,6 +607,9 @@ async fn handle_dedup(
     State(state): State<Arc<AppState>>,
     Query(params): Query<DedupQuery>,
 ) -> Result<Json<Vec<DedupPair>>, AppError> {
+    if !(0.0..=1.0).contains(&params.threshold) {
+        return Err((StatusCode::BAD_REQUEST, "threshold must be between 0.0 and 1.0".to_string()));
+    }
     let db = state.db.lock().await;
     let id_to_idx: HashMap<&str, usize> =
         db.records.iter().enumerate().map(|(i, r)| (r.id.as_str(), i)).collect();
@@ -956,7 +1018,7 @@ async fn main() -> Result<()> {
         }
 
         // ── serve ──────────────────────────────────────────────────────────
-        Commands::Serve { port } => {
+        Commands::Serve { port, host } => {
             let records = read_db(&cli.file)?;
             let hp = hnsw_path(&cli.file);
             let index = load_or_build_hnsw(&cli.file, &records)?;
@@ -978,10 +1040,10 @@ async fn main() -> Result<()> {
                 .route("/dedup", get(handle_dedup))
                 .with_state(state);
 
-            let addr = format!("0.0.0.0:{}", port);
+            let addr = format!("{}:{}", host, port);
             let listener = tokio::net::TcpListener::bind(&addr).await?;
             println!("🚀 IntentDB API server started");
-            println!("   http://localhost:{}", port);
+            println!("   http://{}:{}", host, port);
             println!("   db file: {}", cli.file.display());
             println!();
             println!("endpoints:");
