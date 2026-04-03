@@ -2,6 +2,7 @@
 
 > A schema-free, intent-native storage engine. Put data in plain language. Search in plain language.
 
+[![crates.io](https://img.shields.io/crates/v/intentdb?style=flat-square)](https://crates.io/crates/intentdb)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue?style=flat-square)](LICENSE)
 
 ```bash
@@ -37,6 +38,12 @@ intentdb is built on a custom binary file format (`.idb`) with an HNSW graph ind
 ---
 
 ## Install
+
+```bash
+cargo install intentdb
+```
+
+Or build from source:
 
 ```bash
 git clone https://github.com/zzzzico12/intentdb
@@ -205,7 +212,7 @@ Estimated on Apple M2, 1536-dim vectors (OpenAI `text-embedding-3-small`), M=16,
 - [x] Export (JSON, CSV)
 - [x] Duplicate detection
 - [x] Related record discovery
-- [ ] `cargo install intentdb` on crates.io
+- [x] `cargo install intentdb` on crates.io
 - [ ] Python client (`intentdb-py`)
 - [ ] Docker image
 - [ ] Multi-device sync
