@@ -173,7 +173,7 @@ fn read_db(path: &PathBuf) -> Result<Vec<IntentRecord>> {
     } else if &magic == MAGIC_V1 {
         false
     } else {
-        anyhow::bail!("不正なファイル形式です（マジックバイト不一致）");
+        anyhow::bail!("invalid file format (magic bytes mismatch)");
     };
     let count = f.read_u32::<LittleEndian>()? as usize;
     let mut records = Vec::with_capacity(count);
@@ -223,7 +223,7 @@ fn load_or_build_hnsw(db_path: &PathBuf, records: &[IntentRecord]) -> Result<hns
         return Ok(index);
     }
     if !records.is_empty() {
-        eprintln!("🔧 インデックスを構築中 ({} 件)...", records.len());
+        eprintln!("🔧 building index ({} records)...", records.len());
     }
     let index =
         hnsw::Hnsw::build(records.iter().map(|r| (r.id.clone(), r.vector.clone())));
@@ -289,10 +289,10 @@ async fn get_embedding(text: &str, api_key: &str) -> Result<Vec<f32>> {
         .json(&req)
         .send()
         .await
-        .context("OpenAI APIへの接続に失敗しました")?
+        .context("failed to connect to OpenAI API")?
         .json()
         .await
-        .context("OpenAI APIのレスポンス解析に失敗しました")?;
+        .context("failed to parse OpenAI API response")?;
     Ok(resp.data.into_iter().next().unwrap().embedding)
 }
 
@@ -475,7 +475,7 @@ async fn handle_delete(
     db.records.retain(|r| !r.id.starts_with(&id));
     let deleted = before - db.records.len();
     if deleted == 0 {
-        return Err((StatusCode::NOT_FOUND, format!("ID「{}」が見つかりません", id)));
+        return Err((StatusCode::NOT_FOUND, format!("record not found: {}", id)));
     }
     db.index =
         hnsw::Hnsw::build(db.records.iter().map(|r| (r.id.clone(), r.vector.clone())));
@@ -495,7 +495,7 @@ async fn handle_update(
 
     let mut db = state.db.lock().await;
     let rec = db.records.iter_mut().find(|r| r.id.starts_with(&id))
-        .ok_or_else(|| (StatusCode::NOT_FOUND, format!("ID「{}」が見つかりません", id)))?;
+        .ok_or_else(|| (StatusCode::NOT_FOUND, format!("record not found: {}", id)))?;
 
     rec.text = body.text.clone();
     rec.vector = vector;
@@ -519,7 +519,7 @@ async fn handle_related(
 ) -> Result<Json<Vec<SearchResult>>, AppError> {
     let db = state.db.lock().await;
     let target = db.records.iter().find(|r| r.id.starts_with(&id))
-        .ok_or_else(|| (StatusCode::NOT_FOUND, format!("ID「{}」が見つかりません", id)))?;
+        .ok_or_else(|| (StatusCode::NOT_FOUND, format!("record not found: {}", id)))?;
 
     let target_vec = target.vector.clone();
     let target_id = target.id.clone();
@@ -583,12 +583,12 @@ async fn handle_dedup(
 async fn main() -> Result<()> {
     let cli = Cli::parse();
     let api_key = std::env::var("OPENAI_API_KEY")
-        .context("環境変数 OPENAI_API_KEY が設定されていません\n例: export OPENAI_API_KEY=sk-...")?;
+        .context("OPENAI_API_KEY is not set\nhint: export OPENAI_API_KEY=sk-...")?;
 
     match cli.command {
         // ── put ────────────────────────────────────────────────────────────
         Commands::Put { text, tags } => {
-            println!("📥 embedding生成中...");
+            println!("📥 generating embedding...");
             let vector = get_embedding(&text, &api_key).await?;
             let id = uuid::Uuid::new_v4().to_string();
             let mut records = read_db(&cli.file)?;
@@ -611,11 +611,11 @@ async fn main() -> Result<()> {
             }
             index.insert(id.clone(), vector);
             index.save(&hp)?;
-            println!("✅ 保存しました（合計 {} 件）", records.len());
-            println!("   ID: {}", &id[..8]);
-            println!("   テキスト: {}", text);
+            println!("✅ saved ({} total)", records.len());
+            println!("   id:   {}", &id[..8]);
+            println!("   text: {}", text);
             if !tags.is_empty() {
-                println!("   タグ: {}", tags.join(", "));
+                println!("   tags: {}", tags.join(", "));
             }
         }
 
@@ -624,13 +624,12 @@ async fn main() -> Result<()> {
             let mut records = read_db(&cli.file)?;
             let target = records.iter().find(|r| r.id.starts_with(&id)).cloned();
             let Some(old) = target else {
-                anyhow::bail!("ID「{}」に一致するレコードが見つかりませんでした", id);
+                anyhow::bail!("no record found matching id \"{}\"", id);
             };
 
-            println!("✏️  embedding再生成中...");
+            println!("✏️  regenerating embedding...");
             let vector = get_embedding(&text, &api_key).await?;
 
-            // タグ指定がなければ既存タグを維持
             let new_tags = if tags.is_empty() { old.tags.clone() } else { tags };
 
             if let Some(rec) = records.iter_mut().find(|r| r.id.starts_with(&id)) {
@@ -642,11 +641,11 @@ async fn main() -> Result<()> {
             write_db(&cli.file, &records)?;
             rebuild_and_save_hnsw(&cli.file, &records)?;
 
-            println!("✅ 更新しました");
-            println!("   ID: {}...", &old.id[..8]);
-            println!("   テキスト: {} → {}", old.text, text);
+            println!("✅ updated");
+            println!("   id:   {}...", &old.id[..8]);
+            println!("   text: {} → {}", old.text, text);
             if !new_tags.is_empty() {
-                println!("   タグ: {}", new_tags.join(", "));
+                println!("   tags: {}", new_tags.join(", "));
             }
         }
 
@@ -654,10 +653,10 @@ async fn main() -> Result<()> {
         Commands::Search { query, top, tags } => {
             let records = read_db(&cli.file)?;
             if records.is_empty() {
-                println!("DBにデータがありません。まず `idb put \"テキスト\"` で追加してください。");
+                println!("no records found. add one with `idb put \"your text\"`");
                 return Ok(());
             }
-            println!("🔍 「{}」で検索中...", query);
+            println!("🔍 searching for \"{}\"...", query);
             let query_vec = get_embedding(&query, &api_key).await?;
             let index = load_or_build_hnsw(&cli.file, &records)?;
             let record_map: HashMap<&str, &IntentRecord> =
@@ -670,12 +669,12 @@ async fn main() -> Result<()> {
                 .take(top)
                 .collect();
             if !tags.is_empty() {
-                println!("   タグフィルタ: {}", tags.join(", "));
+                println!("   tag filter: {}", tags.join(", "));
             }
-            println!("\n結果（上位 {} 件）:", scored.len());
+            println!("\ntop {} results:", scored.len());
             println!("{}", "─".repeat(50));
             for (i, (score, rec)) in scored.iter().enumerate() {
-                println!("{}. [スコア: {:.3}]{}", i + 1, score, format_tags(&rec.tags));
+                println!("{}. [score: {:.3}]{}", i + 1, score, format_tags(&rec.tags));
                 println!("   {}", rec.text);
                 println!("   ID: {}...", &rec.id[..8]);
                 println!();
@@ -688,7 +687,7 @@ async fn main() -> Result<()> {
             let target = records
                 .iter()
                 .find(|r| r.id.starts_with(&id))
-                .ok_or_else(|| anyhow::anyhow!("ID「{}」に一致するレコードが見つかりません", id))?;
+                .ok_or_else(|| anyhow::anyhow!("no record found matching id \"{}\"", id))?;
 
             let index = load_or_build_hnsw(&cli.file, &records)?;
             let record_map: HashMap<&str, &IntentRecord> =
@@ -703,11 +702,11 @@ async fn main() -> Result<()> {
                 .take(top)
                 .collect();
 
-            println!("🔗 「{}」に関連するレコード（上位 {} 件）:", &target.id[..8], related.len());
-            println!("   起点: {}", target.text);
+            println!("🔗 related to [{}...] (top {})", &target.id[..8], related.len());
+            println!("   origin: {}", target.text);
             println!("{}", "─".repeat(50));
             for (i, (score, rec)) in related.iter().enumerate() {
-                println!("{}. [類似度: {:.3}]{}", i + 1, score, format_tags(&rec.tags));
+                println!("{}. [score: {:.3}]{}", i + 1, score, format_tags(&rec.tags));
                 println!("   {}", rec.text);
                 println!("   ID: {}...", &rec.id[..8]);
                 println!();
@@ -718,15 +717,15 @@ async fn main() -> Result<()> {
         Commands::List { tags } => {
             let records = read_db(&cli.file)?;
             if records.is_empty() {
-                println!("DBにデータがありません。");
+                println!("no records found.");
                 return Ok(());
             }
             let filtered: Vec<&IntentRecord> =
                 records.iter().filter(|rec| matches_tags(rec, &tags)).collect();
             if !tags.is_empty() {
-                println!("📋 {} 件（タグフィルタ: {}）", filtered.len(), tags.join(", "));
+                println!("📋 {} records (tag filter: {})", filtered.len(), tags.join(", "));
             } else {
-                println!("📋 全 {} 件", filtered.len());
+                println!("📋 {} records", filtered.len());
             }
             println!("{}", "─".repeat(50));
             for (i, rec) in filtered.iter().enumerate() {
@@ -746,11 +745,11 @@ async fn main() -> Result<()> {
             let before = records.len();
             records.retain(|r| !r.id.starts_with(&id));
             if records.len() == before {
-                anyhow::bail!("ID「{}」に一致するレコードが見つかりませんでした", id);
+                anyhow::bail!("no record found matching id \"{}\"", id);
             }
             write_db(&cli.file, &records)?;
             rebuild_and_save_hnsw(&cli.file, &records)?;
-            println!("🗑️  削除しました（残り {} 件）", records.len());
+            println!("🗑️  deleted ({} remaining)", records.len());
         }
 
         // ── import ─────────────────────────────────────────────────────────
@@ -767,13 +766,12 @@ async fn main() -> Result<()> {
             let entries: Vec<ImportEntry> = match fmt.as_str() {
                 "json" => {
                     let s = std::fs::read_to_string(&path)
-                        .context("ファイルの読み込みに失敗しました")?;
-                    serde_json::from_str(&s).context("JSON形式が正しくありません")?
+                        .context("failed to read file")?;
+                    serde_json::from_str(&s).context("invalid JSON format")?
                 }
                 "csv" => {
-                    // CSVフォーマット: text列必須、tags列任意（カンマ区切りで複数可）
                     let mut rdr = csv::Reader::from_path(&path)
-                        .context("CSVファイルの読み込みに失敗しました")?;
+                        .context("failed to read CSV file")?;
                     let mut entries = Vec::new();
                     for result in rdr.records() {
                         let r = result?;
@@ -795,7 +793,7 @@ async fn main() -> Result<()> {
                 "txt" | _ => {
                     // TXT: 1行1レコード、タグなし
                     let s = std::fs::read_to_string(&path)
-                        .context("ファイルの読み込みに失敗しました")?;
+                        .context("failed to read file")?;
                     s.lines()
                         .map(|l| l.trim().to_string())
                         .filter(|l| !l.is_empty())
@@ -805,11 +803,11 @@ async fn main() -> Result<()> {
             };
 
             if entries.is_empty() {
-                println!("インポートするデータがありません。");
+                println!("no entries to import.");
                 return Ok(());
             }
 
-            println!("📦 {} 件をインポート開始...", entries.len());
+            println!("📦 importing {} records...", entries.len());
             let mut records = read_db(&cli.file)?;
             let hp = hnsw_path(&cli.file);
             let mut index = load_or_build_hnsw(&cli.file, &records)?;
@@ -828,21 +826,21 @@ async fn main() -> Result<()> {
                 });
                 added += 1;
                 if (i + 1) % 10 == 0 || i + 1 == entries.len() {
-                    print!("\r   {}/{} 件完了...", i + 1, entries.len());
+                    print!("\r   {}/{} done...", i + 1, entries.len());
                     let _ = std::io::stdout().flush();
                 }
             }
             println!();
             write_db(&cli.file, &records)?;
             index.save(&hp)?;
-            println!("✅ {} 件インポートしました（合計 {} 件）", added, records.len());
+            println!("✅ imported {} records ({} total)", added, records.len());
         }
 
         // ── export ─────────────────────────────────────────────────────────
         Commands::Export { output, format } => {
             let records = read_db(&cli.file)?;
             if records.is_empty() {
-                println!("DBにデータがありません。");
+                println!("no records found.");
                 return Ok(());
             }
 
@@ -877,7 +875,7 @@ async fn main() -> Result<()> {
 
             if let Some(out_path) = output {
                 std::fs::write(&out_path, &content)?;
-                println!("✅ {} 件を {} にエクスポートしました", records.len(), out_path.display());
+                println!("✅ exported {} records to {}", records.len(), out_path.display());
             } else {
                 println!("{}", content);
             }
@@ -887,11 +885,11 @@ async fn main() -> Result<()> {
         Commands::Dedup { threshold, delete } => {
             let records = read_db(&cli.file)?;
             if records.len() < 2 {
-                println!("レコードが2件未満です。");
+                println!("need at least 2 records.");
                 return Ok(());
             }
 
-            println!("🔎 重複検出中（閾値: {:.2}）...", threshold);
+            println!("🔎 detecting duplicates (threshold: {:.2})...", threshold);
             let index = load_or_build_hnsw(&cli.file, &records)?;
             let id_to_idx: HashMap<&str, usize> =
                 records.iter().enumerate().map(|(i, r)| (r.id.as_str(), i)).collect();
@@ -918,16 +916,16 @@ async fn main() -> Result<()> {
             }
 
             if dup_pairs.is_empty() {
-                println!("✅ 重複レコードは見つかりませんでした。");
+                println!("✅ no duplicates found.");
                 return Ok(());
             }
 
-            println!("\n⚠️  {} ペアの重複候補が見つかりました:", dup_pairs.len());
+            println!("\n⚠️  {} duplicate pair(s) found:", dup_pairs.len());
             println!("{}", "─".repeat(50));
             for (i, j, score) in &dup_pairs {
                 let a = &records[*i];
                 let b = &records[*j];
-                println!("[類似度: {:.3}]", score);
+                println!("[score: {:.3}]", score);
                 println!("  A [{}...] {}", &a.id[..8], a.text);
                 println!("  B [{}...] {}", &b.id[..8], b.text);
                 println!();
@@ -951,9 +949,9 @@ async fn main() -> Result<()> {
 
                 write_db(&cli.file, &remaining)?;
                 rebuild_and_save_hnsw(&cli.file, &remaining)?;
-                println!("🗑️  {} 件削除しました（残り {} 件）", to_delete.len(), remaining.len());
+                println!("🗑️  deleted {} record(s) ({} remaining)", to_delete.len(), remaining.len());
             } else {
-                println!("削除するには --delete オプションを付けてください。");
+                println!("run with --delete to remove duplicates automatically.");
             }
         }
 
@@ -982,18 +980,18 @@ async fn main() -> Result<()> {
 
             let addr = format!("0.0.0.0:{}", port);
             let listener = tokio::net::TcpListener::bind(&addr).await?;
-            println!("🚀 IntentDB API サーバー起動");
+            println!("🚀 IntentDB API server started");
             println!("   http://localhost:{}", port);
-            println!("   DBファイル: {}", cli.file.display());
+            println!("   db file: {}", cli.file.display());
             println!();
-            println!("エンドポイント:");
-            println!("  POST   /records              レコード追加");
-            println!("  GET    /records              全件取得 (?tag=xxx)");
-            println!("  PATCH  /records/:id          更新");
-            println!("  DELETE /records/:id          削除");
-            println!("  GET    /records/:id/related  関連レコード (?top=5)");
-            println!("  GET    /search               検索 (?q=xxx&top=5&tag=xxx)");
-            println!("  GET    /dedup                重複検出 (?threshold=0.95)");
+            println!("endpoints:");
+            println!("  POST   /records              add a record");
+            println!("  GET    /records              list records (?tag=xxx)");
+            println!("  PATCH  /records/:id          update a record");
+            println!("  DELETE /records/:id          delete a record");
+            println!("  GET    /records/:id/related  related records (?top=5)");
+            println!("  GET    /search               search (?q=xxx&top=5&tag=xxx)");
+            println!("  GET    /dedup                detect duplicates (?threshold=0.95)");
             axum::serve(listener, app).await?;
         }
     }

@@ -325,7 +325,7 @@ impl Hnsw {
 
         let mut magic = [0u8; 4];
         f.read_exact(&mut magic)?;
-        anyhow::ensure!(&magic == MAGIC, "不正なHNSWファイル形式");
+        anyhow::ensure!(&magic == MAGIC, "invalid HNSW file format");
 
         let m = f.read_u32::<LittleEndian>()? as usize;
         let ef_construction = f.read_u32::<LittleEndian>()? as usize;
