@@ -1,28 +1,27 @@
-/// HNSW (Hierarchical Navigable Small World) インデックス
-///
-/// 多層グラフ構造による近似最近傍探索。
-/// 線形スキャン O(N) → O(log N) に改善。
-///
-/// ファイルフォーマット (.hnsw):
-///   [MAGIC: 4B "HNW1"]
-///   [M: u32][ef_construction: u32]
-///   [entry_point: i64]  (-1 = 空)
-///   [max_layer: u32]
-///   [node_count: u32]
-///   各ノード:
-///     [id_len: u16][id bytes]
-///     [vector_dim: u32][f32 x dim]
-///     [level: u32]
-///     for lc in 0..=level:
-///       [conn_count: u32][node_idx: u32 x conn_count]
-
+//! HNSW (Hierarchical Navigable Small World) インデックス
+//!
+//! 多層グラフ構造による近似最近傍探索。
+//! 線形スキャン O(N) → O(log N) に改善。
+//!
+//! ファイルフォーマット (.hnsw):
+//!   [MAGIC: 4B "HNW1"]
+//!   [M: u32][ef_construction: u32]
+//!   [entry_point: i64]  (-1 = 空)
+//!   [max_layer: u32]
+//!   [node_count: u32]
+//!   各ノード:
+//!     [id_len: u16][id bytes]
+//!     [vector_dim: u32][f32 x dim]
+//!     [level: u32]
+//!     for lc in 0..=level:
+//!       [conn_count: u32][node_idx: u32 x conn_count]
 use anyhow::Result;
 use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
 use rand::Rng;
 use std::cmp::Ordering;
 use std::collections::{BinaryHeap, HashSet};
 use std::io::{Read, Write};
-use std::path::PathBuf;
+use std::path::Path;
 
 const MAGIC: &[u8; 4] = b"HNW1";
 const DEFAULT_M: usize = 16;
@@ -285,7 +284,7 @@ impl Hnsw {
     }
 
     /// .hnsw ファイルに保存
-    pub fn save(&self, path: &PathBuf) -> Result<()> {
+    pub fn save(&self, path: &Path) -> Result<()> {
         let mut f = std::fs::File::create(path)?;
         f.write_all(MAGIC)?;
         f.write_u32::<LittleEndian>(self.m as u32)?;
@@ -317,7 +316,7 @@ impl Hnsw {
     }
 
     /// .hnsw ファイルから読み込み（存在しなければ空インデックスを返す）
-    pub fn load(path: &PathBuf) -> Result<Self> {
+    pub fn load(path: &Path) -> Result<Self> {
         if !path.exists() {
             return Ok(Self::new());
         }

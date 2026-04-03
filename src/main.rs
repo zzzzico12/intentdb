@@ -2,7 +2,7 @@ mod hnsw;
 
 use anyhow::{Context, Result};
 use axum::{
-    extract::{Path, Query, State},
+    extract::{Path as AxumPath, Query, State},
     http::StatusCode,
     response::Json,
     routing::{delete, get, post},
@@ -13,7 +13,7 @@ use clap::{Parser, Subcommand};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::io::{Read, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
@@ -149,7 +149,7 @@ const MAX_INPUT_TEXT: usize = 32_768;            // 32KB（OpenAI制限は約300
 const MAX_TAG_INPUT: usize = 256;
 const MAX_TAGS_COUNT: usize = 64;
 
-fn write_db(path: &PathBuf, records: &[IntentRecord]) -> Result<()> {
+fn write_db(path: &Path, records: &[IntentRecord]) -> Result<()> {
     let mut f = std::fs::File::create(path)?;
     f.write_all(MAGIC_V2)?;
     f.write_u32::<LittleEndian>(records.len() as u32)?;
@@ -175,7 +175,7 @@ fn write_db(path: &PathBuf, records: &[IntentRecord]) -> Result<()> {
     Ok(())
 }
 
-fn read_db(path: &PathBuf) -> Result<Vec<IntentRecord>> {
+fn read_db(path: &Path) -> Result<Vec<IntentRecord>> {
     if !path.exists() {
         return Ok(vec![]);
     }
@@ -234,11 +234,11 @@ fn read_db(path: &PathBuf) -> Result<Vec<IntentRecord>> {
 
 // ─── HNSWヘルパー ─────────────────────────────────────────────────────────
 
-fn hnsw_path(db_path: &PathBuf) -> PathBuf {
+fn hnsw_path(db_path: &Path) -> PathBuf {
     db_path.with_extension("hnsw")
 }
 
-fn load_or_build_hnsw(db_path: &PathBuf, records: &[IntentRecord]) -> Result<hnsw::Hnsw> {
+fn load_or_build_hnsw(db_path: &Path, records: &[IntentRecord]) -> Result<hnsw::Hnsw> {
     let hp = hnsw_path(db_path);
     let index = hnsw::Hnsw::load(&hp)?;
     if index.len() == records.len() {
@@ -253,7 +253,7 @@ fn load_or_build_hnsw(db_path: &PathBuf, records: &[IntentRecord]) -> Result<hns
     Ok(index)
 }
 
-fn rebuild_and_save_hnsw(db_path: &PathBuf, records: &[IntentRecord]) -> Result<hnsw::Hnsw> {
+fn rebuild_and_save_hnsw(db_path: &Path, records: &[IntentRecord]) -> Result<hnsw::Hnsw> {
     let index =
         hnsw::Hnsw::build(records.iter().map(|r| (r.id.clone(), r.vector.clone())));
     index.save(&hnsw_path(db_path))?;
@@ -522,7 +522,7 @@ async fn handle_search(
 
 async fn handle_delete(
     State(state): State<Arc<AppState>>,
-    Path(id): Path<String>,
+    AxumPath(id): AxumPath<String>,
 ) -> Result<Json<serde_json::Value>, AppError> {
     let mut db = state.db.lock().await;
     let before = db.records.len();
@@ -542,7 +542,7 @@ async fn handle_delete(
 // PATCH /records/:id
 async fn handle_update(
     State(state): State<Arc<AppState>>,
-    Path(id): Path<String>,
+    AxumPath(id): AxumPath<String>,
     Json(body): Json<UpdateBody>,
 ) -> Result<Json<RecordResponse>, AppError> {
     validate_text(&body.text)?;
@@ -570,7 +570,7 @@ async fn handle_update(
 // GET /records/:id/related?top=5
 async fn handle_related(
     State(state): State<Arc<AppState>>,
-    Path(id): Path<String>,
+    AxumPath(id): AxumPath<String>,
     Query(params): Query<RelatedQuery>,
 ) -> Result<Json<Vec<SearchResult>>, AppError> {
     if params.top == 0 || params.top > 100 {
@@ -852,7 +852,7 @@ async fn main() -> Result<()> {
                     }
                     entries
                 }
-                "txt" | _ => {
+                _ => {
                     // TXT: 1行1レコード、タグなし
                     let s = std::fs::read_to_string(&path)
                         .context("failed to read file")?;
