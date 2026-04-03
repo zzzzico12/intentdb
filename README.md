@@ -1,83 +1,231 @@
-# IntentDB
+# intentdb
 
-スキーマ不要・自然言語で入れて自然言語で検索できるストレージエンジン。
+> A schema-free, intent-native storage engine. Put data in plain language. Search in plain language.
 
-SQLも型定義も不要。テキストを入れれば、意味で検索できる。
-
-```
-idb put "田中さんは2024年3月に商品Aを購入した"
-idb search "最近問題があった顧客"
-```
-
-## コンセプト
-
-従来のDBはスキーマ設計が前提。IntentDBは「何を保存したいか」だけ書けばいい。  
-テキストはOpenAIのembeddingベクトルに変換され、独自バイナリ形式（`.idb`）で保存される。  
-検索はコサイン類似度による意味検索。キーワードが一致しなくても文脈で引っかかる。
-
-## インストール
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue?style=flat-square)](LICENSE)
 
 ```bash
-git clone https://github.com/yourname/intentdb
-cd intentdb
-cargo build --release
-# PATHに追加するか、直接 ./target/release/idb を使う
+# Put anything. No schema, no columns, no types.
+$ idb put "Tanaka bought Product A in March 2024"
+$ idb put "Suzuki contacted support last week about a billing issue"
+$ idb put "Yamada has been a loyal customer for 3 years"
+
+# Search in plain language.
+$ idb search "customers who had problems recently"
+
+1. [score: 0.941] Suzuki contacted support last week about a billing issue
+2. [score: 0.812] Tanaka bought Product A in March 2024
 ```
 
-**必要なもの:**
-- Rust 1.75+
-- OpenAI APIキー（[platform.openai.com](https://platform.openai.com) で取得）
+---
 
-## 使い方
+## Why intentdb?
+
+Every database requires you to design a schema before you store anything.  
+intentdb does not. Just put text in. Ask questions later.
+
+| | Traditional DB | Vector DB | **intentdb** |
+|---|---|---|---|
+| Schema required | ✅ Yes | ⚠️ Partial | ❌ None |
+| Natural language query | ❌ | ⚠️ With glue code | ✅ Native |
+| Storage engine | Off-the-shelf | Off-the-shelf | **Custom (.idb)** |
+| Index type | B-tree | HNSW (library) | **HNSW (from scratch)** |
+| Single binary | ❌ | ❌ | ✅ |
+
+intentdb is built on a custom binary file format (`.idb`) with an HNSW graph index written from scratch in Rust — not a wrapper around PostgreSQL, SQLite, or Faiss.
+
+---
+
+## Install
+
+```bash
+git clone https://github.com/zzzzico12/intentdb
+cd intentdb
+cargo build --release
+# Add to PATH, or use ./target/release/idb directly
+```
+
+Set your OpenAI API key:
 
 ```bash
 export OPENAI_API_KEY=sk-...
+```
 
-# データを追加
-idb put "田中さんは2024年3月に商品Aを購入した"
-idb put "佐藤さんから返品のクレームが来た"
-idb put "来週の月曜にミーティングを設定した"
+**Requirements:** Rust 1.75+, OpenAI API key
 
-# 自然言語で検索（上位5件）
-idb search "最近問題があった顧客"
-idb search "スケジュール関連の記録"
+---
 
-# 検索件数を指定
-idb search "購入履歴" --top 10
+## Quickstart (30 seconds)
 
-# 全件表示
+```bash
+# Add records — anything goes, no schema needed
+idb put "Alice closed a $50k deal on Friday"
+idb put "Bob's server went down at 2am, resolved by morning"
+idb put "Carol has been asking about the enterprise plan"
+
+# Add records with tags
+idb put "Dave reported a login bug" --tag bug --tag urgent
+
+# Search with natural language
+idb search "recent incidents"
+idb search "sales opportunities"
+idb search "customers interested in upgrading"
+
+# Filter by tag
+idb search "bugs" --tag urgent
+
+# List all records
 idb list
+idb list --tag bug
 
-# 削除（IDの先頭8文字で指定）
-idb delete a1b2c3d4
+# Update a record (re-embeds automatically)
+idb update <id> "Updated text here"
 
-# DBファイルを指定（デフォルト: data.idb）
-idb --file mydata.idb put "テキスト"
+# Delete a record
+idb delete <id>
+
+# Find semantically related records by ID
+idb related <id> --top 5
+
+# Detect duplicates
+idb dedup --threshold 0.95
+idb dedup --threshold 0.95 --delete
+
+# Import from files
+idb import data.json      # [{"text": "...", "tags": ["a", "b"]}, ...]
+idb import data.csv       # text column, optional tags column (comma-separated)
+idb import notes.txt      # one record per line
+
+# Export (no vectors)
+idb export --format json -o backup.json
+idb export --format csv -o backup.csv
 ```
 
-## ファイルフォーマット（.idb）
+---
 
-独自バイナリ形式。SQLiteやJSONに依存しない。
+## HTTP API
 
-```
-[MAGIC: 4B "IDB1"]
-[レコード数: u32 LE]
-  [idの長さ: u16][id bytes (UTF-8)]
-  [textの長さ: u32][text bytes (UTF-8)]
-  [vector次元数: u32][f32 x N (LE)]
-  [timestamp: u64 (unix seconds LE)]
-  ...
+intentdb also runs as a local HTTP server:
+
+```bash
+idb serve --port 3000
 ```
 
-## ロードマップ
+```bash
+# Add a record
+curl -X POST http://localhost:3000/records \
+  -H "Content-Type: application/json" \
+  -d '{"text": "Alice closed a deal", "tags": ["sales"]}'
 
-- [x] `put` / `search` / `list` / `delete`
-- [ ] HNSWインデックス（大規模データでの高速検索）
-- [ ] メタデータ・タグによるフィルタリング
-- [ ] AIによるintent自動分類
-- [ ] Pythonバインディング（PyO3）
-- [ ] HTTP API
+# Search
+curl "http://localhost:3000/search?q=recent+sales&top=5"
+curl "http://localhost:3000/search?q=bugs&top=5&tag=urgent"
 
-## ライセンス
+# List
+curl "http://localhost:3000/records"
+curl "http://localhost:3000/records?tag=sales"
 
-MIT
+# Delete
+curl -X DELETE http://localhost:3000/records/<id>
+```
+
+---
+
+## Architecture
+
+intentdb is a purpose-built storage engine, not a layer on top of an existing database.
+
+```
+┌─────────────────────────────────────────┐
+│              CLI / HTTP API             │
+├─────────────────────────────────────────┤
+│         Natural Language Query Engine   │
+│     (query → embedding → HNSW search)  │
+├─────────────────────────────────────────┤
+│         HNSW Index (from scratch)       │
+│    Hierarchical Navigable Small World   │
+├─────────────────────────────────────────┤
+│      Custom File Format  (.idb)         │
+│  [MAGIC][N records][vector + tags]...   │
+└─────────────────────────────────────────┘
+```
+
+### .idb file format
+
+```
+[MAGIC: 4B "IDB2"]
+[record count: u32]
+[record 1]
+  [id length: u16][id bytes]
+  [text length: u32][text bytes]
+  [vector dims: u32][f32 × N]
+  [timestamp: u64]
+  [tag count: u16]
+    [tag length: u16][tag bytes] × N
+[record 2] ...
+```
+
+HNSW graph is stored separately in a `.hnsw` file (same basename as `.idb`), rebuilt automatically if missing or out of sync.
+
+No dependency on SQLite, PostgreSQL, RocksDB, or any existing storage engine.
+
+---
+
+## Benchmarks
+
+Estimated on Apple M2, 1536-dim vectors (OpenAI `text-embedding-3-small`), M=16, ef=50.
+
+| Records | Linear scan | intentdb (HNSW) | Speedup |
+|---------|-------------|-----------------|---------|
+| 1,000   | ~8ms        | ~0.4ms          | ~20×    |
+| 10,000  | ~80ms       | ~1.2ms          | ~67×    |
+| 100,000 | ~820ms      | ~4.8ms          | ~170×   |
+
+---
+
+## Use cases
+
+- **Prompt library** — Store and retrieve AI prompts by meaning, not title
+- **Personal knowledge base** — Dump notes freely, search semantically
+- **Code snippets** — "find the one that reads a file line by line"
+- **Customer notes** — CRM without the schema
+- **Error log search** — "find past incidents similar to this one"
+- **Daily logs** — Free-form entries, meaningful retrieval
+
+---
+
+## Roadmap
+
+- [x] Custom `.idb` file format
+- [x] HNSW index (from scratch in Rust)
+- [x] Natural language put / search / list / delete / update
+- [x] Metadata & tag filtering
+- [x] HTTP API
+- [x] Bulk import (JSON, CSV, TXT)
+- [x] Export (JSON, CSV)
+- [x] Duplicate detection
+- [x] Related record discovery
+- [ ] `cargo install intentdb` on crates.io
+- [ ] Python client (`intentdb-py`)
+- [ ] Docker image
+- [ ] Multi-device sync
+- [ ] Web UI
+
+---
+
+## Contributing
+
+Issues and PRs are welcome.  
+If you find intentdb useful, please consider giving it a ⭐ — it helps others discover the project.
+
+```bash
+git clone https://github.com/zzzzico12/intentdb
+cd intentdb
+cargo build
+```
+
+---
+
+## License
+
+MIT © zzzzico12
