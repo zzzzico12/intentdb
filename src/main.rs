@@ -730,8 +730,22 @@ struct AskResponse {
 type AppError = (StatusCode, String);
 
 fn internal(e: anyhow::Error) -> AppError {
-    eprintln!("internal error: {:#}", e);
-    (StatusCode::INTERNAL_SERVER_ERROR, "internal server error".to_string())
+    let msg = format!("{:#}", e);
+    eprintln!("internal error: {}", msg);
+    // Surface actionable messages to the client
+    if msg.contains("missing field `data`") || msg.contains("parse embedding") || msg.contains("parse LLM") {
+        return (
+            StatusCode::BAD_GATEWAY,
+            "Embedding API error — check that OPENAI_API_KEY is set, or configure --embedding-url / --llm-url for Ollama".to_string(),
+        );
+    }
+    if msg.contains("connect to embedding") || msg.contains("connect to LLM") || msg.contains("Connection refused") {
+        return (
+            StatusCode::BAD_GATEWAY,
+            "Cannot reach embedding/LLM API — is OPENAI_API_KEY set? For Ollama, is `ollama serve` running?".to_string(),
+        );
+    }
+    (StatusCode::INTERNAL_SERVER_ERROR, msg)
 }
 
 // ─── Input validation ─────────────────────────────────────────────────────────
