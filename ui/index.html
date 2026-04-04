@@ -186,10 +186,20 @@
     .toast.show { opacity: 1; }
     .toast.ok  { border-color: #14532d; color: var(--green); }
     .toast.err { border-color: #7f1d1d; color: var(--red); }
+
+    /* ── Offline banner ── */
+    .offline-bar {
+      display: none; background: #7f1d1d22; border-bottom: 1px solid #7f1d1d55;
+      color: var(--red); font-size: 12px; text-align: center; padding: 7px;
+    }
+    .offline-bar.show { display: block; }
   </style>
 </head>
 <body>
 
+<div class="offline-bar" id="offline-bar">
+  Server not reachable — run <code>idb serve</code> in your terminal
+</div>
 <div class="wrap">
   <header>
     <h1>intentdb</h1>
@@ -353,7 +363,11 @@ async function loadStats() {
     const data = await fetch('/records').then(r => r.json());
     document.getElementById('stats').textContent =
       `${Array.isArray(data) ? data.length : 0} records`;
-  } catch { document.getElementById('stats').textContent = 'offline'; }
+    document.getElementById('offline-bar').classList.remove('show');
+  } catch {
+    document.getElementById('stats').textContent = 'offline';
+    document.getElementById('offline-bar').classList.add('show');
+  }
 }
 
 // ── Search ────────────────────────────────────────────────────────────────────

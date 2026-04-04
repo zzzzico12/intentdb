@@ -4,7 +4,7 @@ use anyhow::{Context, Result};
 use axum::{
     extract::{Path as AxumPath, Query, State},
     http::StatusCode,
-    response::{Html, Json},
+    response::{Html, Json, IntoResponse, Response},
     routing::{delete, get, post},
     Router,
 };
@@ -984,6 +984,10 @@ async fn handle_ui() -> Html<&'static str> {
     Html(include_str!("../ui/index.html"))
 }
 
+async fn handle_favicon() -> Response {
+    StatusCode::NO_CONTENT.into_response()
+}
+
 async fn handle_export(
     State(state): State<Arc<AppState>>,
 ) -> Json<Vec<IntentRecord>> {
@@ -1534,6 +1538,7 @@ async fn main() -> Result<()> {
                 .route("/export", get(handle_export))
                 .route("/import", post(handle_import))
                 .route("/", get(handle_ui))
+                .route("/favicon.ico", get(handle_favicon))
                 .with_state(state);
             let addr = format!("{}:{}", host, port);
             let listener = tokio::net::TcpListener::bind(&addr).await?;
