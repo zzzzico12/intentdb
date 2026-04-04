@@ -17,95 +17,124 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
-// ─── CLI定義 ───────────────────────────────────────────────────────────────
+// ─── CLI ──────────────────────────────────────────────────────────────────────
 
 #[derive(Parser)]
 #[command(name = "idb")]
-#[command(about = "IntentDB - スキーマ不要・自然言語で使えるDB")]
+#[command(about = "IntentDB — schema-free, intent-native storage engine")]
 struct Cli {
+    /// DB file path
     #[arg(short, long, default_value = "data.idb")]
     file: PathBuf,
+
+    /// Namespace — stores data in <ns>.idb next to --file (overrides file stem)
+    #[arg(long, default_value = "")]
+    ns: String,
+
+    /// Embedding API endpoint (OpenAI-compatible). Ollama: http://localhost:11434/v1/embeddings
+    #[arg(long, env = "IDB_EMBEDDING_URL",
+          default_value = "https://api.openai.com/v1/embeddings")]
+    embedding_url: String,
+
+    /// Embedding model. Ollama example: nomic-embed-text
+    #[arg(long, env = "IDB_EMBEDDING_MODEL", default_value = "text-embedding-3-small")]
+    embedding_model: String,
+
+    /// LLM API endpoint for `ask` (OpenAI-compatible). Ollama: http://localhost:11434/v1/chat/completions
+    #[arg(long, env = "IDB_LLM_URL",
+          default_value = "https://api.openai.com/v1/chat/completions")]
+    llm_url: String,
+
+    /// LLM model for `ask`. Ollama example: llama3
+    #[arg(long, env = "IDB_LLM_MODEL", default_value = "gpt-4o-mini")]
+    llm_model: String,
+
     #[command(subcommand)]
     command: Commands,
 }
 
 #[derive(Subcommand)]
 enum Commands {
-    /// データを追加する
+    /// Add a record
     Put {
         text: String,
         #[arg(short, long = "tag")]
         tags: Vec<String>,
     },
-    /// 既存レコードを更新する（IDの先頭8文字で指定）
+    /// Update an existing record (id prefix)
     Update {
-        /// 更新するレコードのID（先頭8文字以上）
         id: String,
-        /// 新しいテキスト
         text: String,
-        /// タグを上書きする（省略時は既存タグを維持）
         #[arg(short, long = "tag")]
         tags: Vec<String>,
     },
-    /// 自然言語で検索する
+    /// Semantic (or hybrid) search
     Search {
         query: String,
         #[arg(short, long, default_value = "5")]
         top: usize,
         #[arg(short, long = "tag")]
         tags: Vec<String>,
+        /// Only records added before this date (YYYY-MM-DD or Unix timestamp)
+        #[arg(long)]
+        before: Option<String>,
+        /// Only records added after this date (YYYY-MM-DD or Unix timestamp)
+        #[arg(long)]
+        after: Option<String>,
+        /// Hybrid weight: 1.0 = pure semantic, 0.0 = pure keyword
+        #[arg(long, default_value = "1.0")]
+        alpha: f32,
     },
-    /// IDに近いレコードを探す
+    /// Ask a question answered from stored records (RAG)
+    Ask {
+        question: String,
+        /// Number of source records to use as context
+        #[arg(short, long, default_value = "5")]
+        top: usize,
+    },
+    /// Find semantically related records by ID
     Related {
-        /// 起点にするレコードのID（先頭8文字以上）
         id: String,
         #[arg(short, long, default_value = "5")]
         top: usize,
     },
-    /// 全件表示
+    /// List all records
     List {
         #[arg(short, long = "tag")]
         tags: Vec<String>,
     },
-    /// データを削除する（IDの先頭8文字で指定）
+    /// Delete a record (id prefix)
     Delete { id: String },
-    /// ファイルから一括インポートする（JSON / CSV / TXT）
+    /// Bulk import from JSON / CSV / TXT
     Import {
-        /// インポートするファイルのパス
         path: PathBuf,
-        /// フォーマット（json | csv | txt）。省略時は拡張子から自動判定
         #[arg(short, long)]
         format: Option<String>,
     },
-    /// DBをファイルにエクスポートする
+    /// Export records to JSON or CSV (vectors excluded)
     Export {
-        /// 出力先ファイルのパス（省略時は標準出力）
         #[arg(short, long)]
         output: Option<PathBuf>,
-        /// フォーマット（json | csv）。デフォルト: json
         #[arg(short, long, default_value = "json")]
         format: String,
     },
-    /// 重複レコードを検出する
+    /// Detect duplicate records
     Dedup {
-        /// 類似度がこの値以上なら重複とみなす（0.0〜1.0）
         #[arg(long, default_value = "0.95")]
         threshold: f32,
-        /// 重複を自動削除する（新しいほうを残す）
         #[arg(long)]
         delete: bool,
     },
-    /// HTTP APIサーバーを起動する
+    /// Start HTTP API server
     Serve {
         #[arg(short, long, default_value = "3000")]
         port: u16,
-        /// バインドするホスト（デフォルト: 127.0.0.1）
         #[arg(long, default_value = "127.0.0.1")]
         host: String,
     },
 }
 
-// ─── データ構造 ─────────────────────────────────────────────────────────────
+// ─── Data structures ──────────────────────────────────────────────────────────
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 struct IntentRecord {
@@ -116,7 +145,6 @@ struct IntentRecord {
     tags: Vec<String>,
 }
 
-// インポートファイルの1行
 #[derive(Deserialize)]
 struct ImportEntry {
     text: String,
@@ -124,7 +152,6 @@ struct ImportEntry {
     tags: Vec<String>,
 }
 
-// エクスポート用（ベクトルは除く）
 #[derive(Serialize)]
 struct ExportEntry<'a> {
     id: &'a str,
@@ -133,19 +160,25 @@ struct ExportEntry<'a> {
     timestamp: u64,
 }
 
-// ─── .idbファイルフォーマット ───────────────────────────────────────────────
+// ─── .idb file format ─────────────────────────────────────────────────────────
+//
+// [MAGIC: 4B "IDB2"][record count: u32]
+// Per record:
+//   [id length: u16][id bytes]
+//   [text length: u32][text bytes]
+//   [vector dims: u32][f32 × N]
+//   [timestamp: u64]
+//   [tag count: u16][[tag length: u16][tag bytes] × N]
 
 const MAGIC_V2: &[u8; 4] = b"IDB2";
 const MAGIC_V1: &[u8; 4] = b"IDB1";
 
-// read_db での単一フィールドの最大サイズ（破損・細工ファイルによるOOM防止）
-const MAX_TEXT_BYTES: usize = 10 * 1024 * 1024; // 10MB
-const MAX_VECTOR_DIM: usize = 16_384;            // 最大16384次元
+const MAX_TEXT_BYTES: usize = 10 * 1024 * 1024;
+const MAX_VECTOR_DIM: usize = 16_384;
 const MAX_TAG_COUNT: usize = 1_024;
 const MAX_TAG_BYTES: usize = 4_096;
-const MAX_RECORDS: usize = 10_000_000;           // 1000万件
-// HTTP API 入力制限
-const MAX_INPUT_TEXT: usize = 32_768;            // 32KB（OpenAI制限は約300KB相当だが実用的な上限）
+const MAX_RECORDS: usize = 10_000_000;
+const MAX_INPUT_TEXT: usize = 32_768;
 const MAX_TAG_INPUT: usize = 256;
 const MAX_TAGS_COUNT: usize = 64;
 
@@ -232,10 +265,20 @@ fn read_db(path: &Path) -> Result<Vec<IntentRecord>> {
     Ok(records)
 }
 
-// ─── HNSWヘルパー ─────────────────────────────────────────────────────────
+// ─── HNSW helpers ────────────────────────────────────────────────────────────
 
 fn hnsw_path(db_path: &Path) -> PathBuf {
     db_path.with_extension("hnsw")
+}
+
+/// Resolve effective DB file path, applying namespace if set.
+fn effective_file(file: &Path, ns: &str) -> PathBuf {
+    if ns.is_empty() {
+        file.to_path_buf()
+    } else {
+        let dir = file.parent().unwrap_or(Path::new("."));
+        dir.join(format!("{}.idb", ns))
+    }
 }
 
 fn load_or_build_hnsw(db_path: &Path, records: &[IntentRecord]) -> Result<hnsw::Hnsw> {
@@ -247,20 +290,18 @@ fn load_or_build_hnsw(db_path: &Path, records: &[IntentRecord]) -> Result<hnsw::
     if !records.is_empty() {
         eprintln!("🔧 building index ({} records)...", records.len());
     }
-    let index =
-        hnsw::Hnsw::build(records.iter().map(|r| (r.id.clone(), r.vector.clone())));
+    let index = hnsw::Hnsw::build(records.iter().map(|r| (r.id.clone(), r.vector.clone())));
     index.save(&hp)?;
     Ok(index)
 }
 
 fn rebuild_and_save_hnsw(db_path: &Path, records: &[IntentRecord]) -> Result<hnsw::Hnsw> {
-    let index =
-        hnsw::Hnsw::build(records.iter().map(|r| (r.id.clone(), r.vector.clone())));
+    let index = hnsw::Hnsw::build(records.iter().map(|r| (r.id.clone(), r.vector.clone())));
     index.save(&hnsw_path(db_path))?;
     Ok(index)
 }
 
-// ─── タグフィルタ ──────────────────────────────────────────────────────────
+// ─── General helpers ─────────────────────────────────────────────────────────
 
 fn matches_tags(rec: &IntentRecord, filter: &[String]) -> bool {
     filter.iter().all(|t| rec.tags.contains(t))
@@ -281,7 +322,48 @@ fn now_secs() -> u64 {
         .as_secs()
 }
 
-// ─── OpenAI Embedding API ──────────────────────────────────────────────────
+/// Fraction of query tokens found in text (case-insensitive).
+fn keyword_score(text: &str, query_words: &[String]) -> f32 {
+    if query_words.is_empty() {
+        return 0.0;
+    }
+    let text_lower = text.to_lowercase();
+    let matched = query_words.iter().filter(|w| text_lower.contains(w.as_str())).count();
+    matched as f32 / query_words.len() as f32
+}
+
+/// Split a query string into lowercase tokens (length > 1).
+fn tokenize(query: &str) -> Vec<String> {
+    query
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|w| w.len() > 1)
+        .map(|w| w.to_lowercase())
+        .collect()
+}
+
+/// Parse YYYY-MM-DD or Unix timestamp into seconds since epoch.
+fn parse_date(s: &str) -> Result<u64> {
+    if let Ok(ts) = s.parse::<u64>() {
+        return Ok(ts);
+    }
+    let parts: Vec<&str> = s.splitn(3, '-').collect();
+    if parts.len() == 3 {
+        let y: i64 = parts[0].parse().context("invalid year")?;
+        let m: i64 = parts[1].parse().context("invalid month")?;
+        let d: i64 = parts[2].parse().context("invalid day")?;
+        let a = (14 - m) / 12;
+        let yr = y + 4800 - a;
+        let mo = m + 12 * a - 3;
+        let jdn = d + (153 * mo + 2) / 5 + 365 * yr + yr / 4 - yr / 100 + yr / 400 - 32045;
+        let epoch_jdn: i64 = 2440588;
+        let days = jdn - epoch_jdn;
+        anyhow::ensure!(days >= 0, "date before Unix epoch: {}", s);
+        return Ok(days as u64 * 86400);
+    }
+    anyhow::bail!("invalid date (use YYYY-MM-DD or Unix timestamp): {}", s)
+}
+
+// ─── Embedding API (OpenAI-compatible) ───────────────────────────────────────
 
 #[derive(Serialize)]
 struct EmbedRequest {
@@ -299,28 +381,91 @@ struct EmbedData {
     embedding: Vec<f32>,
 }
 
-async fn get_embedding(text: &str, api_key: &str) -> Result<Vec<f32>> {
+async fn get_embedding(text: &str, api_key: &str, url: &str, model: &str) -> Result<Vec<f32>> {
     let client = reqwest::Client::new();
-    let req = EmbedRequest {
-        input: text.to_string(),
-        model: "text-embedding-3-small".to_string(),
-    };
+    let req = EmbedRequest { input: text.to_string(), model: model.to_string() };
     let resp: EmbedResponse = client
-        .post("https://api.openai.com/v1/embeddings")
+        .post(url)
         .bearer_auth(api_key)
         .json(&req)
         .send()
         .await
-        .context("failed to connect to OpenAI API")?
+        .context("failed to connect to embedding API")?
         .json()
         .await
-        .context("failed to parse OpenAI API response")?;
-    resp.data.into_iter().next()
-        .ok_or_else(|| anyhow::anyhow!("OpenAI returned empty embedding data"))
+        .context("failed to parse embedding API response")?;
+    resp.data
+        .into_iter()
+        .next()
+        .ok_or_else(|| anyhow::anyhow!("embedding API returned empty data"))
         .map(|d| d.embedding)
 }
 
-// ─── HTTP APIのState・型定義 ───────────────────────────────────────────────
+// ─── Chat API (OpenAI-compatible, for ask command) ────────────────────────────
+
+#[derive(Serialize)]
+struct ChatRequest {
+    model: String,
+    messages: Vec<ChatMessage>,
+}
+
+#[derive(Serialize)]
+struct ChatMessage {
+    role: String,
+    content: String,
+}
+
+#[derive(Deserialize)]
+struct ChatResponse {
+    choices: Vec<ChatChoice>,
+}
+
+#[derive(Deserialize)]
+struct ChatChoice {
+    message: ChatMessageContent,
+}
+
+#[derive(Deserialize)]
+struct ChatMessageContent {
+    content: String,
+}
+
+async fn ask_llm(
+    question: &str,
+    context: &str,
+    url: &str,
+    model: &str,
+    api_key: &str,
+) -> Result<String> {
+    let client = reqwest::Client::new();
+    let system = "You are a helpful assistant. Answer the question based solely on the \
+                  provided context. If the answer is not in the context, say so clearly.";
+    let user_content = format!("Context:\n{}\n\nQuestion: {}", context, question);
+    let req = ChatRequest {
+        model: model.to_string(),
+        messages: vec![
+            ChatMessage { role: "system".to_string(), content: system.to_string() },
+            ChatMessage { role: "user".to_string(), content: user_content },
+        ],
+    };
+    let resp: ChatResponse = client
+        .post(url)
+        .bearer_auth(api_key)
+        .json(&req)
+        .send()
+        .await
+        .context("failed to connect to LLM API")?
+        .json()
+        .await
+        .context("failed to parse LLM API response")?;
+    resp.choices
+        .into_iter()
+        .next()
+        .ok_or_else(|| anyhow::anyhow!("LLM returned empty response"))
+        .map(|c| c.message.content)
+}
+
+// ─── HTTP API state & types ───────────────────────────────────────────────────
 
 struct DbState {
     records: Vec<IntentRecord>,
@@ -331,6 +476,10 @@ struct AppState {
     db_path: PathBuf,
     hnsw_path: PathBuf,
     api_key: String,
+    embedding_url: String,
+    embedding_model: String,
+    llm_url: String,
+    llm_model: String,
     db: Mutex<DbState>,
 }
 
@@ -355,7 +504,7 @@ struct TagFilter {
     tag: Vec<String>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Clone)]
 struct RecordResponse {
     id: String,
     text: String,
@@ -381,6 +530,10 @@ struct SearchQuery {
     top: usize,
     #[serde(default)]
     tag: Vec<String>,
+    before: Option<u64>,
+    after: Option<u64>,
+    #[serde(default = "default_alpha")]
+    alpha: f32,
 }
 
 #[derive(Deserialize)]
@@ -397,6 +550,7 @@ struct DedupQuery {
 
 fn default_top() -> usize { 5 }
 fn default_threshold() -> f32 { 0.95 }
+fn default_alpha() -> f32 { 1.0 }
 
 #[derive(Serialize)]
 struct DedupPair {
@@ -421,14 +575,27 @@ struct SearchResult {
     timestamp: u64,
 }
 
+#[derive(Deserialize)]
+struct AskBody {
+    question: String,
+    #[serde(default = "default_top")]
+    top: usize,
+}
+
+#[derive(Serialize)]
+struct AskResponse {
+    answer: String,
+    sources: Vec<RecordResponse>,
+}
+
 type AppError = (StatusCode, String);
+
 fn internal(e: anyhow::Error) -> AppError {
-    // 内部エラーの詳細は外部に露出しない
     eprintln!("internal error: {:#}", e);
     (StatusCode::INTERNAL_SERVER_ERROR, "internal server error".to_string())
 }
 
-// ─── HTTP ハンドラ ─────────────────────────────────────────────────────────
+// ─── Input validation ─────────────────────────────────────────────────────────
 
 fn validate_text(text: &str) -> Result<(), AppError> {
     if text.is_empty() {
@@ -452,16 +619,18 @@ fn validate_tags(tags: &[String]) -> Result<(), AppError> {
     Ok(())
 }
 
+// ─── HTTP handlers ────────────────────────────────────────────────────────────
+
 async fn handle_put(
     State(state): State<Arc<AppState>>,
     Json(body): Json<PutBody>,
 ) -> Result<Json<PutResponse>, AppError> {
     validate_text(&body.text)?;
     validate_tags(&body.tags)?;
-    let vector = get_embedding(&body.text, &state.api_key).await.map_err(internal)?;
+    let vector = get_embedding(&body.text, &state.api_key, &state.embedding_url, &state.embedding_model)
+        .await.map_err(internal)?;
     let id = uuid::Uuid::new_v4().to_string();
     let timestamp = now_secs();
-
     let mut db = state.db.lock().await;
     db.index.insert(id.clone(), vector.clone());
     db.records.push(IntentRecord {
@@ -482,9 +651,7 @@ async fn handle_list(
     Query(filter): Query<TagFilter>,
 ) -> Result<Json<Vec<RecordResponse>>, AppError> {
     let db = state.db.lock().await;
-    let result = db
-        .records
-        .iter()
+    let result = db.records.iter()
         .filter(|r| matches_tags(r, &filter.tag))
         .map(RecordResponse::from)
         .collect();
@@ -499,24 +666,40 @@ async fn handle_search(
     if params.top == 0 || params.top > 100 {
         return Err((StatusCode::BAD_REQUEST, "top must be between 1 and 100".to_string()));
     }
-    let query_vec = get_embedding(&params.q, &state.api_key).await.map_err(internal)?;
+    if !(0.0..=1.0).contains(&params.alpha) {
+        return Err((StatusCode::BAD_REQUEST, "alpha must be between 0.0 and 1.0".to_string()));
+    }
+    let query_vec = get_embedding(&params.q, &state.api_key, &state.embedding_url, &state.embedding_model)
+        .await.map_err(internal)?;
+    let query_words = tokenize(&params.q);
     let db = state.db.lock().await;
     let record_map: HashMap<&str, &IntentRecord> =
         db.records.iter().map(|r| (r.id.as_str(), r)).collect();
     let raw = db.index.search(&query_vec, params.top * 4, 50);
-    let result: Vec<SearchResult> = raw
+    let mut scored: Vec<(f32, &IntentRecord)> = raw
         .iter()
-        .filter_map(|&(score, id)| record_map.get(id).map(|rec| (score, *rec)))
+        .filter_map(|&(sem, id)| record_map.get(id).map(|rec| (sem, *rec)))
         .filter(|(_, rec)| matches_tags(rec, &params.tag))
-        .take(params.top)
-        .map(|(score, rec)| SearchResult {
-            score,
-            id: rec.id.clone(),
-            text: rec.text.clone(),
-            tags: rec.tags.clone(),
-            timestamp: rec.timestamp,
+        .filter(|(_, rec)| params.before.is_none_or(|b| rec.timestamp < b))
+        .filter(|(_, rec)| params.after.is_none_or(|a| rec.timestamp >= a))
+        .map(|(sem, rec)| {
+            let score = if params.alpha >= 1.0 {
+                sem
+            } else {
+                let kw = keyword_score(&rec.text, &query_words);
+                params.alpha * sem + (1.0 - params.alpha) * kw
+            };
+            (score, rec)
         })
         .collect();
+    scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+    let result = scored.iter().take(params.top).map(|(score, rec)| SearchResult {
+        score: *score,
+        id: rec.id.clone(),
+        text: rec.text.clone(),
+        tags: rec.tags.clone(),
+        timestamp: rec.timestamp,
+    }).collect();
     Ok(Json(result))
 }
 
@@ -531,15 +714,13 @@ async fn handle_delete(
     if deleted == 0 {
         return Err((StatusCode::NOT_FOUND, format!("record not found: {}", id)));
     }
-    db.index =
-        hnsw::Hnsw::build(db.records.iter().map(|r| (r.id.clone(), r.vector.clone())));
+    db.index = hnsw::Hnsw::build(db.records.iter().map(|r| (r.id.clone(), r.vector.clone())));
     write_db(&state.db_path, &db.records).map_err(internal)?;
     db.index.save(&state.hnsw_path).map_err(internal)?;
     let remaining = db.records.len();
     Ok(Json(serde_json::json!({ "deleted": deleted, "remaining": remaining })))
 }
 
-// PATCH /records/:id
 async fn handle_update(
     State(state): State<Arc<AppState>>,
     AxumPath(id): AxumPath<String>,
@@ -547,12 +728,11 @@ async fn handle_update(
 ) -> Result<Json<RecordResponse>, AppError> {
     validate_text(&body.text)?;
     validate_tags(&body.tags)?;
-    let vector = get_embedding(&body.text, &state.api_key).await.map_err(internal)?;
-
+    let vector = get_embedding(&body.text, &state.api_key, &state.embedding_url, &state.embedding_model)
+        .await.map_err(internal)?;
     let mut db = state.db.lock().await;
     let rec = db.records.iter_mut().find(|r| r.id.starts_with(&id))
         .ok_or_else(|| (StatusCode::NOT_FOUND, format!("record not found: {}", id)))?;
-
     rec.text = body.text.clone();
     rec.vector = vector;
     if !body.tags.is_empty() {
@@ -560,14 +740,12 @@ async fn handle_update(
     }
     rec.timestamp = now_secs();
     let response = RecordResponse::from(&*rec);
-
     db.index = hnsw::Hnsw::build(db.records.iter().map(|r| (r.id.clone(), r.vector.clone())));
     write_db(&state.db_path, &db.records).map_err(internal)?;
     db.index.save(&state.hnsw_path).map_err(internal)?;
     Ok(Json(response))
 }
 
-// GET /records/:id/related?top=5
 async fn handle_related(
     State(state): State<Arc<AppState>>,
     AxumPath(id): AxumPath<String>,
@@ -579,12 +757,10 @@ async fn handle_related(
     let db = state.db.lock().await;
     let target = db.records.iter().find(|r| r.id.starts_with(&id))
         .ok_or_else(|| (StatusCode::NOT_FOUND, format!("record not found: {}", id)))?;
-
     let target_vec = target.vector.clone();
     let target_id = target.id.clone();
     let record_map: HashMap<&str, &IntentRecord> =
         db.records.iter().map(|r| (r.id.as_str(), r)).collect();
-
     let raw = db.index.search(&target_vec, params.top + 1, 50);
     let result: Vec<SearchResult> = raw
         .iter()
@@ -602,7 +778,6 @@ async fn handle_related(
     Ok(Json(result))
 }
 
-// GET /dedup?threshold=0.95
 async fn handle_dedup(
     State(state): State<Arc<AppState>>,
     Query(params): Query<DedupQuery>,
@@ -613,10 +788,8 @@ async fn handle_dedup(
     let db = state.db.lock().await;
     let id_to_idx: HashMap<&str, usize> =
         db.records.iter().enumerate().map(|(i, r)| (r.id.as_str(), i)).collect();
-
     let mut seen_pairs: HashSet<(usize, usize)> = HashSet::new();
     let mut pairs: Vec<DedupPair> = Vec::new();
-
     for rec in &db.records {
         let raw = db.index.search(&rec.vector, 5, 20);
         for &(score, neighbor_id) in &raw {
@@ -639,21 +812,52 @@ async fn handle_dedup(
     Ok(Json(pairs))
 }
 
-// ─── メイン ────────────────────────────────────────────────────────────────
+async fn handle_ask(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<AskBody>,
+) -> Result<Json<AskResponse>, AppError> {
+    validate_text(&body.question)?;
+    let top = body.top.clamp(1, 20);
+    let query_vec = get_embedding(&body.question, &state.api_key, &state.embedding_url, &state.embedding_model)
+        .await.map_err(internal)?;
+    let db = state.db.lock().await;
+    let record_map: HashMap<&str, &IntentRecord> =
+        db.records.iter().map(|r| (r.id.as_str(), r)).collect();
+    let raw = db.index.search(&query_vec, top * 2, 50);
+    let sources: Vec<&IntentRecord> = raw
+        .iter()
+        .filter_map(|&(_, id)| record_map.get(id).copied())
+        .take(top)
+        .collect();
+    let context = sources.iter().enumerate()
+        .map(|(i, r)| format!("[{}] {}", i + 1, r.text))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let source_responses: Vec<RecordResponse> = sources.iter().map(|r| RecordResponse::from(*r)).collect();
+    drop(db);
+    let answer = ask_llm(&body.question, &context, &state.llm_url, &state.llm_model, &state.api_key)
+        .await.map_err(internal)?;
+    Ok(Json(AskResponse { answer, sources: source_responses }))
+}
+
+// ─── main ─────────────────────────────────────────────────────────────────────
 
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
-    let api_key = std::env::var("OPENAI_API_KEY")
-        .context("OPENAI_API_KEY is not set\nhint: export OPENAI_API_KEY=sk-...")?;
+
+    // OPENAI_API_KEY is optional — not needed when using local Ollama endpoints
+    let api_key = std::env::var("OPENAI_API_KEY").unwrap_or_default();
+
+    let db_file = effective_file(&cli.file, &cli.ns);
 
     match cli.command {
         // ── put ────────────────────────────────────────────────────────────
         Commands::Put { text, tags } => {
             println!("📥 generating embedding...");
-            let vector = get_embedding(&text, &api_key).await?;
+            let vector = get_embedding(&text, &api_key, &cli.embedding_url, &cli.embedding_model).await?;
             let id = uuid::Uuid::new_v4().to_string();
-            let mut records = read_db(&cli.file)?;
+            let mut records = read_db(&db_file)?;
             records.push(IntentRecord {
                 id: id.clone(),
                 text: text.clone(),
@@ -661,14 +865,12 @@ async fn main() -> Result<()> {
                 timestamp: now_secs(),
                 tags: tags.clone(),
             });
-            write_db(&cli.file, &records)?;
-            let hp = hnsw_path(&cli.file);
+            write_db(&db_file, &records)?;
+            let hp = hnsw_path(&db_file);
             let mut index = hnsw::Hnsw::load(&hp)?;
             if index.len() != records.len() - 1 {
                 index = hnsw::Hnsw::build(
-                    records[..records.len() - 1]
-                        .iter()
-                        .map(|r| (r.id.clone(), r.vector.clone())),
+                    records[..records.len() - 1].iter().map(|r| (r.id.clone(), r.vector.clone())),
                 );
             }
             index.insert(id.clone(), vector);
@@ -679,30 +881,29 @@ async fn main() -> Result<()> {
             if !tags.is_empty() {
                 println!("   tags: {}", tags.join(", "));
             }
+            if !cli.ns.is_empty() {
+                println!("   ns:   {}", cli.ns);
+            }
         }
 
         // ── update ─────────────────────────────────────────────────────────
         Commands::Update { id, text, tags } => {
-            let mut records = read_db(&cli.file)?;
+            let mut records = read_db(&db_file)?;
             let target = records.iter().find(|r| r.id.starts_with(&id)).cloned();
             let Some(old) = target else {
                 anyhow::bail!("no record found matching id \"{}\"", id);
             };
-
             println!("✏️  regenerating embedding...");
-            let vector = get_embedding(&text, &api_key).await?;
-
+            let vector = get_embedding(&text, &api_key, &cli.embedding_url, &cli.embedding_model).await?;
             let new_tags = if tags.is_empty() { old.tags.clone() } else { tags };
-
             if let Some(rec) = records.iter_mut().find(|r| r.id.starts_with(&id)) {
                 rec.text = text.clone();
                 rec.vector = vector;
                 rec.tags = new_tags.clone();
                 rec.timestamp = now_secs();
             }
-            write_db(&cli.file, &records)?;
-            rebuild_and_save_hnsw(&cli.file, &records)?;
-
+            write_db(&db_file, &records)?;
+            rebuild_and_save_hnsw(&db_file, &records)?;
             println!("✅ updated");
             println!("   id:   {}...", &old.id[..8]);
             println!("   text: {} → {}", old.text, text);
@@ -712,50 +913,104 @@ async fn main() -> Result<()> {
         }
 
         // ── search ─────────────────────────────────────────────────────────
-        Commands::Search { query, top, tags } => {
-            let records = read_db(&cli.file)?;
+        Commands::Search { query, top, tags, before, after, alpha } => {
+            let records = read_db(&db_file)?;
             if records.is_empty() {
                 println!("no records found. add one with `idb put \"your text\"`");
                 return Ok(());
             }
+            if !(0.0..=1.0).contains(&alpha) {
+                anyhow::bail!("alpha must be between 0.0 and 1.0");
+            }
+            let before_ts = before.as_deref().map(parse_date).transpose()?;
+            let after_ts = after.as_deref().map(parse_date).transpose()?;
+
             println!("🔍 searching for \"{}\"...", query);
-            let query_vec = get_embedding(&query, &api_key).await?;
-            let index = load_or_build_hnsw(&cli.file, &records)?;
+            let query_vec = get_embedding(&query, &api_key, &cli.embedding_url, &cli.embedding_model).await?;
+            let query_words = tokenize(&query);
+            let index = load_or_build_hnsw(&db_file, &records)?;
             let record_map: HashMap<&str, &IntentRecord> =
                 records.iter().map(|r| (r.id.as_str(), r)).collect();
             let raw = index.search(&query_vec, top * 4, 50);
-            let scored: Vec<(f32, &IntentRecord)> = raw
+            let mut scored: Vec<(f32, &IntentRecord)> = raw
                 .iter()
-                .filter_map(|&(score, id)| record_map.get(id).map(|rec| (score, *rec)))
+                .filter_map(|&(sem, id)| record_map.get(id).map(|rec| (sem, *rec)))
                 .filter(|(_, rec)| matches_tags(rec, &tags))
-                .take(top)
+                .filter(|(_, rec)| before_ts.is_none_or(|b| rec.timestamp < b))
+                .filter(|(_, rec)| after_ts.is_none_or(|a| rec.timestamp >= a))
+                .map(|(sem, rec)| {
+                    let score = if alpha >= 1.0 {
+                        sem
+                    } else {
+                        let kw = keyword_score(&rec.text, &query_words);
+                        alpha * sem + (1.0 - alpha) * kw
+                    };
+                    (score, rec)
+                })
                 .collect();
+            scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+
             if !tags.is_empty() {
                 println!("   tag filter: {}", tags.join(", "));
             }
-            println!("\ntop {} results:", scored.len());
+            if before_ts.is_some() || after_ts.is_some() {
+                println!("   time filter: {} ~ {}",
+                    after.as_deref().unwrap_or("*"),
+                    before.as_deref().unwrap_or("*"));
+            }
+            if alpha < 1.0 {
+                println!("   hybrid: alpha={:.2} (semantic) + {:.2} (keyword)", alpha, 1.0 - alpha);
+            }
+            println!("\ntop {} results:", scored.len().min(top));
             println!("{}", "─".repeat(50));
-            for (i, (score, rec)) in scored.iter().enumerate() {
+            for (i, (score, rec)) in scored.iter().take(top).enumerate() {
                 println!("{}. [score: {:.3}]{}", i + 1, score, format_tags(&rec.tags));
                 println!("   {}", rec.text);
-                println!("   ID: {}...", &rec.id[..8]);
+                println!("   id: {}...", &rec.id[..8]);
                 println!();
+            }
+        }
+
+        // ── ask ────────────────────────────────────────────────────────────
+        Commands::Ask { question, top } => {
+            let records = read_db(&db_file)?;
+            if records.is_empty() {
+                println!("no records found. add some with `idb put \"your text\"`");
+                return Ok(());
+            }
+            println!("🤔 finding relevant context...");
+            let query_vec = get_embedding(&question, &api_key, &cli.embedding_url, &cli.embedding_model).await?;
+            let index = load_or_build_hnsw(&db_file, &records)?;
+            let record_map: HashMap<&str, &IntentRecord> =
+                records.iter().map(|r| (r.id.as_str(), r)).collect();
+            let raw = index.search(&query_vec, top * 2, 50);
+            let sources: Vec<&IntentRecord> = raw
+                .iter()
+                .filter_map(|&(_, id)| record_map.get(id).copied())
+                .take(top)
+                .collect();
+            let context = sources.iter().enumerate()
+                .map(|(i, r)| format!("[{}] {}", i + 1, r.text))
+                .collect::<Vec<_>>()
+                .join("\n");
+            println!("💬 asking {} ({} sources)...\n", cli.llm_model, sources.len());
+            let answer = ask_llm(&question, &context, &cli.llm_url, &cli.llm_model, &api_key).await?;
+            println!("{}\n", answer);
+            println!("{}", "─".repeat(50));
+            println!("sources:");
+            for (i, rec) in sources.iter().enumerate() {
+                println!("  {}. [{}...]{} {}", i + 1, &rec.id[..8], format_tags(&rec.tags), rec.text);
             }
         }
 
         // ── related ────────────────────────────────────────────────────────
         Commands::Related { id, top } => {
-            let records = read_db(&cli.file)?;
-            let target = records
-                .iter()
-                .find(|r| r.id.starts_with(&id))
+            let records = read_db(&db_file)?;
+            let target = records.iter().find(|r| r.id.starts_with(&id))
                 .ok_or_else(|| anyhow::anyhow!("no record found matching id \"{}\"", id))?;
-
-            let index = load_or_build_hnsw(&cli.file, &records)?;
+            let index = load_or_build_hnsw(&db_file, &records)?;
             let record_map: HashMap<&str, &IntentRecord> =
                 records.iter().map(|r| (r.id.as_str(), r)).collect();
-
-            // top+1 件取得して自分自身を除外
             let raw = index.search(&target.vector, top + 1, 50);
             let related: Vec<(f32, &IntentRecord)> = raw
                 .iter()
@@ -763,21 +1018,20 @@ async fn main() -> Result<()> {
                 .filter(|(_, rec)| rec.id != target.id)
                 .take(top)
                 .collect();
-
             println!("🔗 related to [{}...] (top {})", &target.id[..8], related.len());
             println!("   origin: {}", target.text);
             println!("{}", "─".repeat(50));
             for (i, (score, rec)) in related.iter().enumerate() {
                 println!("{}. [score: {:.3}]{}", i + 1, score, format_tags(&rec.tags));
                 println!("   {}", rec.text);
-                println!("   ID: {}...", &rec.id[..8]);
+                println!("   id: {}...", &rec.id[..8]);
                 println!();
             }
         }
 
         // ── list ───────────────────────────────────────────────────────────
         Commands::List { tags } => {
-            let records = read_db(&cli.file)?;
+            let records = read_db(&db_file)?;
             if records.is_empty() {
                 println!("no records found.");
                 return Ok(());
@@ -789,28 +1043,25 @@ async fn main() -> Result<()> {
             } else {
                 println!("📋 {} records", filtered.len());
             }
+            if !cli.ns.is_empty() {
+                println!("   namespace: {}", cli.ns);
+            }
             println!("{}", "─".repeat(50));
             for (i, rec) in filtered.iter().enumerate() {
-                println!(
-                    "{}. [{}...]{} {}",
-                    i + 1,
-                    &rec.id[..8],
-                    format_tags(&rec.tags),
-                    rec.text
-                );
+                println!("{}. [{}...]{} {}", i + 1, &rec.id[..8], format_tags(&rec.tags), rec.text);
             }
         }
 
         // ── delete ─────────────────────────────────────────────────────────
         Commands::Delete { id } => {
-            let mut records = read_db(&cli.file)?;
+            let mut records = read_db(&db_file)?;
             let before = records.len();
             records.retain(|r| !r.id.starts_with(&id));
             if records.len() == before {
                 anyhow::bail!("no record found matching id \"{}\"", id);
             }
-            write_db(&cli.file, &records)?;
-            rebuild_and_save_hnsw(&cli.file, &records)?;
+            write_db(&db_file, &records)?;
+            rebuild_and_save_hnsw(&db_file, &records)?;
             println!("🗑️  deleted ({} remaining)", records.len());
         }
 
@@ -818,49 +1069,32 @@ async fn main() -> Result<()> {
         Commands::Import { path, format } => {
             let fmt = format
                 .unwrap_or_else(|| {
-                    path.extension()
-                        .and_then(|e| e.to_str())
-                        .unwrap_or("txt")
-                        .to_string()
+                    path.extension().and_then(|e| e.to_str()).unwrap_or("txt").to_string()
                 })
                 .to_lowercase();
 
             let entries: Vec<ImportEntry> = match fmt.as_str() {
                 "json" => {
-                    let s = std::fs::read_to_string(&path)
-                        .context("failed to read file")?;
+                    let s = std::fs::read_to_string(&path).context("failed to read file")?;
                     serde_json::from_str(&s).context("invalid JSON format")?
                 }
                 "csv" => {
-                    let mut rdr = csv::Reader::from_path(&path)
-                        .context("failed to read CSV file")?;
+                    let mut rdr = csv::Reader::from_path(&path).context("failed to read CSV file")?;
                     let mut entries = Vec::new();
                     for result in rdr.records() {
                         let r = result?;
                         let text = r.get(0).unwrap_or("").trim().to_string();
-                        if text.is_empty() {
-                            continue;
-                        }
-                        let tags: Vec<String> = r
-                            .get(1)
-                            .unwrap_or("")
-                            .split(',')
-                            .map(|s| s.trim().to_string())
-                            .filter(|s| !s.is_empty())
-                            .collect();
+                        if text.is_empty() { continue; }
+                        let tags: Vec<String> = r.get(1).unwrap_or("")
+                            .split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
                         entries.push(ImportEntry { text, tags });
                     }
                     entries
                 }
                 _ => {
-                    // TXT: 1行1レコード、タグなし
-                    let s = std::fs::read_to_string(&path)
-                        .context("failed to read file")?;
-                    s.lines()
-                        .map(|l| l.trim().to_string())
-                        .filter(|l| !l.is_empty())
-                        .map(|text| ImportEntry { text, tags: vec![] })
-                        .collect()
+                    let s = std::fs::read_to_string(&path).context("failed to read file")?;
+                    s.lines().map(|l| l.trim().to_string()).filter(|l| !l.is_empty())
+                        .map(|text| ImportEntry { text, tags: vec![] }).collect()
                 }
             };
 
@@ -868,23 +1102,17 @@ async fn main() -> Result<()> {
                 println!("no entries to import.");
                 return Ok(());
             }
-
             println!("📦 importing {} records...", entries.len());
-            let mut records = read_db(&cli.file)?;
-            let hp = hnsw_path(&cli.file);
-            let mut index = load_or_build_hnsw(&cli.file, &records)?;
+            let mut records = read_db(&db_file)?;
+            let hp = hnsw_path(&db_file);
+            let mut index = load_or_build_hnsw(&db_file, &records)?;
             let mut added = 0usize;
-
             for (i, entry) in entries.iter().enumerate() {
-                let vector = get_embedding(&entry.text, &api_key).await?;
+                let vector = get_embedding(&entry.text, &api_key, &cli.embedding_url, &cli.embedding_model).await?;
                 let id = uuid::Uuid::new_v4().to_string();
                 index.insert(id.clone(), vector.clone());
                 records.push(IntentRecord {
-                    id,
-                    text: entry.text.clone(),
-                    vector,
-                    timestamp: now_secs(),
-                    tags: entry.tags.clone(),
+                    id, text: entry.text.clone(), vector, timestamp: now_secs(), tags: entry.tags.clone(),
                 });
                 added += 1;
                 if (i + 1) % 10 == 0 || i + 1 == entries.len() {
@@ -893,48 +1121,35 @@ async fn main() -> Result<()> {
                 }
             }
             println!();
-            write_db(&cli.file, &records)?;
+            write_db(&db_file, &records)?;
             index.save(&hp)?;
             println!("✅ imported {} records ({} total)", added, records.len());
         }
 
         // ── export ─────────────────────────────────────────────────────────
         Commands::Export { output, format } => {
-            let records = read_db(&cli.file)?;
+            let records = read_db(&db_file)?;
             if records.is_empty() {
                 println!("no records found.");
                 return Ok(());
             }
-
             let content = match format.to_lowercase().as_str() {
                 "csv" => {
                     let mut out = String::from("id,text,tags,timestamp\n");
                     for rec in &records {
-                        // CSVの特殊文字をエスケープ
                         let text = rec.text.replace('"', "\"\"");
                         let tags = rec.tags.join(",").replace('"', "\"\"");
-                        out.push_str(&format!(
-                            "\"{}\",\"{}\",\"{}\",{}\n",
-                            rec.id, text, tags, rec.timestamp
-                        ));
+                        out.push_str(&format!("\"{}\",\"{}\",\"{}\",{}\n", rec.id, text, tags, rec.timestamp));
                     }
                     out
                 }
                 _ => {
-                    // json
-                    let entries: Vec<ExportEntry> = records
-                        .iter()
-                        .map(|r| ExportEntry {
-                            id: &r.id,
-                            text: &r.text,
-                            tags: &r.tags,
-                            timestamp: r.timestamp,
-                        })
+                    let entries: Vec<ExportEntry> = records.iter()
+                        .map(|r| ExportEntry { id: &r.id, text: &r.text, tags: &r.tags, timestamp: r.timestamp })
                         .collect();
                     serde_json::to_string_pretty(&entries)?
                 }
             };
-
             if let Some(out_path) = output {
                 std::fs::write(&out_path, &content)?;
                 println!("✅ exported {} records to {}", records.len(), out_path.display());
@@ -945,43 +1160,31 @@ async fn main() -> Result<()> {
 
         // ── dedup ──────────────────────────────────────────────────────────
         Commands::Dedup { threshold, delete } => {
-            let records = read_db(&cli.file)?;
+            let records = read_db(&db_file)?;
             if records.len() < 2 {
                 println!("need at least 2 records.");
                 return Ok(());
             }
-
             println!("🔎 detecting duplicates (threshold: {:.2})...", threshold);
-            let index = load_or_build_hnsw(&cli.file, &records)?;
+            let index = load_or_build_hnsw(&db_file, &records)?;
             let id_to_idx: HashMap<&str, usize> =
                 records.iter().enumerate().map(|(i, r)| (r.id.as_str(), i)).collect();
-
             let mut seen_pairs: HashSet<(usize, usize)> = HashSet::new();
             let mut dup_pairs: Vec<(usize, usize, f32)> = Vec::new();
-
             for rec in &records {
                 let raw = index.search(&rec.vector, 5, 20);
                 for &(score, neighbor_id) in &raw {
-                    if neighbor_id == rec.id.as_str() {
-                        continue;
-                    }
-                    if score < threshold {
-                        continue;
-                    }
+                    if neighbor_id == rec.id.as_str() || score < threshold { continue; }
                     let i = id_to_idx[rec.id.as_str()];
                     let j = id_to_idx[neighbor_id];
                     let pair = (i.min(j), i.max(j));
-                    if seen_pairs.insert(pair) {
-                        dup_pairs.push((pair.0, pair.1, score));
-                    }
+                    if seen_pairs.insert(pair) { dup_pairs.push((pair.0, pair.1, score)); }
                 }
             }
-
             if dup_pairs.is_empty() {
                 println!("✅ no duplicates found.");
                 return Ok(());
             }
-
             println!("\n⚠️  {} duplicate pair(s) found:", dup_pairs.len());
             println!("{}", "─".repeat(50));
             for (i, j, score) in &dup_pairs {
@@ -992,25 +1195,14 @@ async fn main() -> Result<()> {
                 println!("  B [{}...] {}", &b.id[..8], b.text);
                 println!();
             }
-
             if delete {
-                // 各ペアでより新しいほう（大きいtimestamp）を削除
-                let to_delete: HashSet<usize> = dup_pairs
-                    .iter()
-                    .map(|&(i, j, _)| {
-                        if records[i].timestamp >= records[j].timestamp { i } else { j }
-                    })
+                let to_delete: HashSet<usize> = dup_pairs.iter()
+                    .map(|&(i, j, _)| if records[i].timestamp >= records[j].timestamp { i } else { j })
                     .collect();
-
-                let remaining: Vec<IntentRecord> = records
-                    .into_iter()
-                    .enumerate()
-                    .filter(|(i, _)| !to_delete.contains(i))
-                    .map(|(_, r)| r)
-                    .collect();
-
-                write_db(&cli.file, &remaining)?;
-                rebuild_and_save_hnsw(&cli.file, &remaining)?;
+                let remaining: Vec<IntentRecord> = records.into_iter().enumerate()
+                    .filter(|(i, _)| !to_delete.contains(i)).map(|(_, r)| r).collect();
+                write_db(&db_file, &remaining)?;
+                rebuild_and_save_hnsw(&db_file, &remaining)?;
                 println!("🗑️  deleted {} record(s) ({} remaining)", to_delete.len(), remaining.len());
             } else {
                 println!("run with --delete to remove duplicates automatically.");
@@ -1019,32 +1211,36 @@ async fn main() -> Result<()> {
 
         // ── serve ──────────────────────────────────────────────────────────
         Commands::Serve { port, host } => {
-            let records = read_db(&cli.file)?;
-            let hp = hnsw_path(&cli.file);
-            let index = load_or_build_hnsw(&cli.file, &records)?;
-
+            let records = read_db(&db_file)?;
+            let hp = hnsw_path(&db_file);
+            let index = load_or_build_hnsw(&db_file, &records)?;
             let state = Arc::new(AppState {
-                db_path: cli.file.clone(),
+                db_path: db_file.clone(),
                 hnsw_path: hp,
                 api_key,
+                embedding_url: cli.embedding_url.clone(),
+                embedding_model: cli.embedding_model.clone(),
+                llm_url: cli.llm_url.clone(),
+                llm_model: cli.llm_model.clone(),
                 db: Mutex::new(DbState { records, index }),
             });
-
             let app = Router::new()
                 .route("/records", post(handle_put))
                 .route("/records", get(handle_list))
-                .route("/records/:id", delete(handle_delete))
                 .route("/records/:id", axum::routing::patch(handle_update))
+                .route("/records/:id", delete(handle_delete))
                 .route("/records/:id/related", get(handle_related))
                 .route("/search", get(handle_search))
                 .route("/dedup", get(handle_dedup))
+                .route("/ask", post(handle_ask))
                 .with_state(state);
-
             let addr = format!("{}:{}", host, port);
             let listener = tokio::net::TcpListener::bind(&addr).await?;
             println!("🚀 IntentDB API server started");
             println!("   http://{}:{}", host, port);
-            println!("   db file: {}", cli.file.display());
+            println!("   db file: {}", db_file.display());
+            println!("   embedding: {} ({})", cli.embedding_model, cli.embedding_url);
+            println!("   llm: {} ({})", cli.llm_model, cli.llm_url);
             println!();
             println!("endpoints:");
             println!("  POST   /records              add a record");
@@ -1052,8 +1248,9 @@ async fn main() -> Result<()> {
             println!("  PATCH  /records/:id          update a record");
             println!("  DELETE /records/:id          delete a record");
             println!("  GET    /records/:id/related  related records (?top=5)");
-            println!("  GET    /search               search (?q=xxx&top=5&tag=xxx)");
+            println!("  GET    /search               search (?q=xxx&top=5&tag=xxx&before=unix&after=unix&alpha=0.7)");
             println!("  GET    /dedup                detect duplicates (?threshold=0.95)");
+            println!("  POST   /ask                  ask a question (RAG)");
             axum::serve(listener, app).await?;
         }
     }

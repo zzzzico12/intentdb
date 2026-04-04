@@ -59,7 +59,7 @@ Set your OpenAI API key:
 export OPENAI_API_KEY=sk-...
 ```
 
-**Requirements:** Rust 1.75+, OpenAI API key
+**Requirements:** Rust 1.75+, OpenAI API key (or Ollama for local inference)
 
 ---
 
@@ -81,6 +81,21 @@ idb search "customers interested in upgrading"
 
 # Filter by tag
 idb search "bugs" --tag urgent
+
+# Time-travel: filter by date
+idb search "recent incidents" --after 2024-01-01
+idb search "old issues" --before 2024-06-01 --after 2024-01-01
+
+# Hybrid search (semantic + keyword blend)
+idb search "login bug" --alpha 0.7   # 70% semantic, 30% keyword
+
+# Ask a question (RAG — retrieves context then answers via LLM)
+idb ask "What customer issues happened last week?"
+
+# Namespaces (separate data sets in same directory)
+idb --ns sales put "Alice closed a deal"
+idb --ns incidents put "Bob's server went down"
+idb --ns sales search "recent deals"
 
 # List all records
 idb list
@@ -111,6 +126,37 @@ idb export --format csv -o backup.csv
 
 ---
 
+## Ollama (local, no API key needed)
+
+Run intentdb fully offline using [Ollama](https://ollama.com):
+
+```bash
+# Pull a model that supports embeddings
+ollama pull nomic-embed-text
+ollama pull llama3
+
+# Point intentdb at Ollama's OpenAI-compatible endpoints
+export IDB_EMBEDDING_URL=http://localhost:11434/v1/embeddings
+export IDB_EMBEDDING_MODEL=nomic-embed-text
+export IDB_LLM_URL=http://localhost:11434/v1/chat/completions
+export IDB_LLM_MODEL=llama3
+
+# No OPENAI_API_KEY needed
+idb put "Alice closed a deal"
+idb search "recent sales"
+idb ask "Who closed deals recently?"
+```
+
+Or pass flags directly:
+
+```bash
+idb --embedding-url http://localhost:11434/v1/embeddings \
+    --embedding-model nomic-embed-text \
+    search "recent sales"
+```
+
+---
+
 ## HTTP API
 
 intentdb also runs as a local HTTP server:
@@ -125,9 +171,16 @@ curl -X POST http://localhost:3000/records \
   -H "Content-Type: application/json" \
   -d '{"text": "Alice closed a deal", "tags": ["sales"]}'
 
-# Search
+# Search (with optional time-travel and hybrid blend)
 curl "http://localhost:3000/search?q=recent+sales&top=5"
 curl "http://localhost:3000/search?q=bugs&top=5&tag=urgent"
+curl "http://localhost:3000/search?q=incidents&after=2024-01-01&before=2024-06-01"
+curl "http://localhost:3000/search?q=login+bug&alpha=0.7"
+
+# Ask (RAG)
+curl -X POST http://localhost:3000/ask \
+  -H "Content-Type: application/json" \
+  -d '{"question": "What customer issues happened last week?", "top": 5}'
 
 # List
 curl "http://localhost:3000/records"
@@ -251,6 +304,11 @@ Estimated on Apple M2, 1536-dim vectors (OpenAI `text-embedding-3-small`), M=16,
 - [x] `cargo install intentdb` on crates.io
 - [x] Python client (`python/intentdb.py`, stdlib only)
 - [x] Docker image
+- [x] Ollama / local LLM support (`--embedding-url`, `--llm-url`)
+- [x] `ask` command — RAG over stored records
+- [x] Time-travel queries (`--before`, `--after`)
+- [x] Hybrid search (`--alpha` semantic + keyword blend)
+- [x] Namespaces (`--ns`)
 - [ ] Multi-device sync
 - [ ] Web UI
 
