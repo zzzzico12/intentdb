@@ -82,6 +82,9 @@ idb search "customers interested in upgrading"
 # Filter by tag
 idb search "bugs" --tag urgent
 
+# Only show high-confidence results
+idb search "billing issue" --min-score 0.75
+
 # Time-travel: filter by date
 idb search "recent incidents" --after 2024-01-01
 idb search "old issues" --before 2024-06-01 --after 2024-01-01
@@ -89,10 +92,19 @@ idb search "old issues" --before 2024-06-01 --after 2024-01-01
 # Hybrid search (semantic + keyword blend)
 idb search "login bug" --alpha 0.7   # 70% semantic, 30% keyword
 
-# Ask a question (RAG — retrieves context then answers via LLM)
+# Ask a question — RAG (retrieves relevant context, then answers via LLM)
 idb ask "What customer issues happened last week?"
 
-# Namespaces (separate data sets in same directory)
+# Summarize stored records via LLM
+idb summarize                                      # all records
+idb summarize "billing issues" --tag support       # focused topic
+idb summarize --after 2024-06-01                   # time-bounded
+
+# Cluster records by semantic similarity
+idb cluster --k 5
+idb cluster --k 3 --tag support
+
+# Namespaces (isolated data sets in the same directory)
 idb --ns sales put "Alice closed a deal"
 idb --ns incidents put "Bob's server went down"
 idb --ns sales search "recent deals"
@@ -119,6 +131,11 @@ idb import data.json      # [{"text": "...", "tags": ["a", "b"]}, ...]
 idb import data.csv       # text column, optional tags column (comma-separated)
 idb import notes.txt      # one record per line
 
+# Import from stdin (pipe-friendly)
+cat errors.txt | idb import -
+echo "quick note" | idb import -
+tail -f app.log | idb import - --format txt
+
 # Export (no vectors)
 idb export --format json -o backup.json
 idb export --format csv -o backup.csv
@@ -131,7 +148,7 @@ idb export --format csv -o backup.csv
 Run intentdb fully offline using [Ollama](https://ollama.com):
 
 ```bash
-# Pull a model that supports embeddings
+# Pull models
 ollama pull nomic-embed-text
 ollama pull llama3
 
@@ -145,6 +162,7 @@ export IDB_LLM_MODEL=llama3
 idb put "Alice closed a deal"
 idb search "recent sales"
 idb ask "Who closed deals recently?"
+idb summarize "this week's activity"
 ```
 
 Or pass flags directly:
@@ -154,6 +172,14 @@ idb --embedding-url http://localhost:11434/v1/embeddings \
     --embedding-model nomic-embed-text \
     search "recent sales"
 ```
+
+| Env var | CLI flag | Default |
+|---|---|---|
+| `OPENAI_API_KEY` | — | *(empty — not needed for Ollama)* |
+| `IDB_EMBEDDING_URL` | `--embedding-url` | `https://api.openai.com/v1/embeddings` |
+| `IDB_EMBEDDING_MODEL` | `--embedding-model` | `text-embedding-3-small` |
+| `IDB_LLM_URL` | `--llm-url` | `https://api.openai.com/v1/chat/completions` |
+| `IDB_LLM_MODEL` | `--llm-model` | `gpt-4o-mini` |
 
 ---
 
@@ -171,16 +197,20 @@ curl -X POST http://localhost:3000/records \
   -H "Content-Type: application/json" \
   -d '{"text": "Alice closed a deal", "tags": ["sales"]}'
 
-# Search (with optional time-travel and hybrid blend)
+# Search (time-travel, hybrid blend, min-score)
 curl "http://localhost:3000/search?q=recent+sales&top=5"
 curl "http://localhost:3000/search?q=bugs&top=5&tag=urgent"
-curl "http://localhost:3000/search?q=incidents&after=2024-01-01&before=2024-06-01"
-curl "http://localhost:3000/search?q=login+bug&alpha=0.7"
+curl "http://localhost:3000/search?q=incidents&after=1704067200&before=1717200000"
+curl "http://localhost:3000/search?q=login+bug&alpha=0.7&min_score=0.6"
 
 # Ask (RAG)
 curl -X POST http://localhost:3000/ask \
   -H "Content-Type: application/json" \
   -d '{"question": "What customer issues happened last week?", "top": 5}'
+
+# Summarize
+curl "http://localhost:3000/summarize"
+curl "http://localhost:3000/summarize?topic=billing+issues&tag=support&top=20"
 
 # List
 curl "http://localhost:3000/records"
@@ -224,6 +254,37 @@ pairs = db.dedup(threshold=0.95)
 ```
 
 Copy [python/intentdb.py](python/intentdb.py) into your project — no pip install needed (stdlib only).
+
+---
+
+## Command reference
+
+| Command | Description |
+|---|---|
+| `idb put <text>` | Add a record (embeds automatically) |
+| `idb search <query>` | Semantic search |
+| `idb ask <question>` | RAG: answer a question from stored records |
+| `idb summarize [topic]` | LLM summary of stored records |
+| `idb cluster` | Group records by semantic similarity |
+| `idb list` | List all records |
+| `idb update <id> <text>` | Update a record (re-embeds) |
+| `idb delete <id>` | Delete a record |
+| `idb related <id>` | Find related records |
+| `idb dedup` | Detect (and optionally delete) duplicates |
+| `idb import <file\|->`  | Import from JSON / CSV / TXT or stdin |
+| `idb export` | Export to JSON or CSV |
+| `idb serve` | Start HTTP API server |
+
+### Search options
+
+| Flag | Default | Description |
+|---|---|---|
+| `--top N` | 5 | Number of results |
+| `--tag <tag>` | — | Filter by tag (repeatable) |
+| `--after YYYY-MM-DD` | — | Only records added after date |
+| `--before YYYY-MM-DD` | — | Only records added before date |
+| `--alpha 0.0–1.0` | 1.0 | Blend: 1.0 = pure semantic, 0.0 = pure keyword |
+| `--min-score 0.0–1.0` | 0.0 | Minimum similarity threshold |
 
 ---
 
@@ -287,6 +348,8 @@ Estimated on Apple M2, 1536-dim vectors (OpenAI `text-embedding-3-small`), M=16,
 - **Customer notes** — CRM without the schema
 - **Error log search** — "find past incidents similar to this one"
 - **Daily logs** — Free-form entries, meaningful retrieval
+- **Log pipeline** — Pipe `tail -f app.log | idb import -` to capture events live
+- **Weekly digest** — `idb summarize "this week" --after 2024-01-01` for auto-reports
 
 ---
 
@@ -297,7 +360,7 @@ Estimated on Apple M2, 1536-dim vectors (OpenAI `text-embedding-3-small`), M=16,
 - [x] Natural language put / search / list / delete / update
 - [x] Metadata & tag filtering
 - [x] HTTP API
-- [x] Bulk import (JSON, CSV, TXT)
+- [x] Bulk import (JSON, CSV, TXT, stdin pipe)
 - [x] Export (JSON, CSV)
 - [x] Duplicate detection
 - [x] Related record discovery
@@ -306,8 +369,11 @@ Estimated on Apple M2, 1536-dim vectors (OpenAI `text-embedding-3-small`), M=16,
 - [x] Docker image
 - [x] Ollama / local LLM support (`--embedding-url`, `--llm-url`)
 - [x] `ask` command — RAG over stored records
+- [x] `summarize` command — LLM summary of stored records
+- [x] `cluster` command — semantic k-means grouping
 - [x] Time-travel queries (`--before`, `--after`)
 - [x] Hybrid search (`--alpha` semantic + keyword blend)
+- [x] Minimum score filter (`--min-score`)
 - [x] Namespaces (`--ns`)
 - [ ] Multi-device sync
 - [ ] Web UI

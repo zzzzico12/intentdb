@@ -84,6 +84,9 @@ enum Commands {
         /// Hybrid weight: 1.0 = pure semantic, 0.0 = pure keyword
         #[arg(long, default_value = "1.0")]
         alpha: f32,
+        /// Minimum similarity score threshold (0.0–1.0)
+        #[arg(long, default_value = "0.0")]
+        min_score: f32,
     },
     /// Ask a question answered from stored records (RAG)
     Ask {
@@ -91,6 +94,30 @@ enum Commands {
         /// Number of source records to use as context
         #[arg(short, long, default_value = "5")]
         top: usize,
+    },
+    /// Summarize stored records via LLM
+    Summarize {
+        /// Focus topic (optional, e.g. "billing issues this week")
+        topic: Option<String>,
+        #[arg(short, long = "tag")]
+        tags: Vec<String>,
+        /// Only records added before this date
+        #[arg(long)]
+        before: Option<String>,
+        /// Only records added after this date
+        #[arg(long)]
+        after: Option<String>,
+        /// Max records to include as context
+        #[arg(short, long, default_value = "20")]
+        top: usize,
+    },
+    /// Cluster records by semantic similarity (k-means)
+    Cluster {
+        /// Number of clusters
+        #[arg(short, long, default_value = "5")]
+        k: usize,
+        #[arg(short, long = "tag")]
+        tags: Vec<String>,
     },
     /// Find semantically related records by ID
     Related {
@@ -465,6 +492,76 @@ async fn ask_llm(
         .map(|c| c.message.content)
 }
 
+// ─── K-means clustering ───────────────────────────────────────────────────────
+
+fn dot_sim(a: &[f32], b: &[f32]) -> f32 {
+    let dot: f32 = a.iter().zip(b).map(|(x, y)| x * y).sum();
+    let na = a.iter().map(|x| x * x).sum::<f32>().sqrt();
+    let nb = b.iter().map(|x| x * x).sum::<f32>().sqrt();
+    if na == 0.0 || nb == 0.0 { 0.0 } else { dot / (na * nb) }
+}
+
+/// K-means clustering using cosine similarity. Returns cluster index per record.
+fn kmeans(vecs: &[Vec<f32>], k: usize) -> Vec<usize> {
+    if vecs.is_empty() || k == 0 {
+        return vec![];
+    }
+    let k = k.min(vecs.len());
+    let dim = vecs[0].len();
+    // Spread initial centroids evenly
+    let mut centroids: Vec<Vec<f32>> =
+        (0..k).map(|i| vecs[i * vecs.len() / k].clone()).collect();
+    let mut assignments = vec![0usize; vecs.len()];
+
+    for _ in 0..30 {
+        // Assign each vector to the nearest centroid
+        let mut changed = false;
+        for (i, v) in vecs.iter().enumerate() {
+            let best = centroids
+                .iter()
+                .enumerate()
+                .max_by(|(_, a), (_, b)| {
+                    dot_sim(v, a)
+                        .partial_cmp(&dot_sim(v, b))
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                })
+                .map(|(ci, _)| ci)
+                .unwrap_or(0);
+            if assignments[i] != best {
+                assignments[i] = best;
+                changed = true;
+            }
+        }
+        if !changed {
+            break;
+        }
+        // Recompute centroids as mean of members
+        for (c, centroid) in centroids.iter_mut().enumerate() {
+            let members: Vec<&Vec<f32>> = vecs
+                .iter()
+                .enumerate()
+                .filter(|(i, _)| assignments[*i] == c)
+                .map(|(_, v)| v)
+                .collect();
+            if members.is_empty() {
+                continue;
+            }
+            let mut new_centroid = vec![0f32; dim];
+            for m in &members {
+                for (j, &val) in m.iter().enumerate() {
+                    new_centroid[j] += val;
+                }
+            }
+            let n = members.len() as f32;
+            for val in &mut new_centroid {
+                *val /= n;
+            }
+            *centroid = new_centroid;
+        }
+    }
+    assignments
+}
+
 // ─── HTTP API state & types ───────────────────────────────────────────────────
 
 struct DbState {
@@ -534,7 +631,28 @@ struct SearchQuery {
     after: Option<u64>,
     #[serde(default = "default_alpha")]
     alpha: f32,
+    #[serde(default)]
+    min_score: f32,
 }
+
+#[derive(Deserialize)]
+struct SummarizeQuery {
+    topic: Option<String>,
+    #[serde(default)]
+    tag: Vec<String>,
+    before: Option<u64>,
+    after: Option<u64>,
+    #[serde(default = "default_summarize_top")]
+    top: usize,
+}
+
+#[derive(Serialize)]
+struct SummarizeResponse {
+    summary: String,
+    record_count: usize,
+}
+
+fn default_summarize_top() -> usize { 20 }
 
 #[derive(Deserialize)]
 struct RelatedQuery {
@@ -691,6 +809,7 @@ async fn handle_search(
             };
             (score, rec)
         })
+        .filter(|(score, _)| *score >= params.min_score)
         .collect();
     scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
     let result = scored.iter().take(params.top).map(|(score, rec)| SearchResult {
@@ -840,6 +959,44 @@ async fn handle_ask(
     Ok(Json(AskResponse { answer, sources: source_responses }))
 }
 
+async fn handle_summarize(
+    State(state): State<Arc<AppState>>,
+    Query(params): Query<SummarizeQuery>,
+) -> Result<Json<SummarizeResponse>, AppError> {
+    if params.top == 0 || params.top > 200 {
+        return Err((StatusCode::BAD_REQUEST, "top must be between 1 and 200".to_string()));
+    }
+    let db = state.db.lock().await;
+    let records: Vec<&IntentRecord> = db.records.iter()
+        .filter(|r| matches_tags(r, &params.tag))
+        .filter(|r| params.before.is_none_or(|b| r.timestamp < b))
+        .filter(|r| params.after.is_none_or(|a| r.timestamp >= a))
+        .take(params.top)
+        .collect();
+    if records.is_empty() {
+        return Ok(Json(SummarizeResponse {
+            summary: "No records found matching the given filters.".to_string(),
+            record_count: 0,
+        }));
+    }
+    let record_count = records.len();
+    let context = records.iter().enumerate()
+        .map(|(i, r)| format!("[{}] {}", i + 1, r.text))
+        .collect::<Vec<_>>()
+        .join("\n");
+    drop(db);
+    let topic_line = params.topic.as_deref().unwrap_or("the stored records");
+    let prompt = format!(
+        "Summarize the following records about {}. \
+         Identify key themes, patterns, and notable items. \
+         Be concise but comprehensive.",
+        topic_line
+    );
+    let answer = ask_llm(&prompt, &context, &state.llm_url, &state.llm_model, &state.api_key)
+        .await.map_err(internal)?;
+    Ok(Json(SummarizeResponse { summary: answer, record_count }))
+}
+
 // ─── main ─────────────────────────────────────────────────────────────────────
 
 #[tokio::main]
@@ -913,7 +1070,7 @@ async fn main() -> Result<()> {
         }
 
         // ── search ─────────────────────────────────────────────────────────
-        Commands::Search { query, top, tags, before, after, alpha } => {
+        Commands::Search { query, top, tags, before, after, alpha, min_score } => {
             let records = read_db(&db_file)?;
             if records.is_empty() {
                 println!("no records found. add one with `idb put \"your text\"`");
@@ -947,6 +1104,7 @@ async fn main() -> Result<()> {
                     };
                     (score, rec)
                 })
+                .filter(|(score, _)| *score >= min_score)
                 .collect();
             scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
 
@@ -1067,19 +1225,29 @@ async fn main() -> Result<()> {
 
         // ── import ─────────────────────────────────────────────────────────
         Commands::Import { path, format } => {
+            let is_stdin = path.to_str() == Some("-");
             let fmt = format
                 .unwrap_or_else(|| {
-                    path.extension().and_then(|e| e.to_str()).unwrap_or("txt").to_string()
+                    if is_stdin { "txt".to_string() }
+                    else { path.extension().and_then(|e| e.to_str()).unwrap_or("txt").to_string() }
                 })
                 .to_lowercase();
 
+            // Read source into string (file or stdin)
+            let source = if is_stdin {
+                let mut buf = String::new();
+                std::io::stdin().read_to_string(&mut buf).context("failed to read stdin")?;
+                buf
+            } else {
+                std::fs::read_to_string(&path).context("failed to read file")?
+            };
+
             let entries: Vec<ImportEntry> = match fmt.as_str() {
                 "json" => {
-                    let s = std::fs::read_to_string(&path).context("failed to read file")?;
-                    serde_json::from_str(&s).context("invalid JSON format")?
+                    serde_json::from_str(&source).context("invalid JSON format")?
                 }
                 "csv" => {
-                    let mut rdr = csv::Reader::from_path(&path).context("failed to read CSV file")?;
+                    let mut rdr = csv::Reader::from_reader(source.as_bytes());
                     let mut entries = Vec::new();
                     for result in rdr.records() {
                         let r = result?;
@@ -1092,8 +1260,7 @@ async fn main() -> Result<()> {
                     entries
                 }
                 _ => {
-                    let s = std::fs::read_to_string(&path).context("failed to read file")?;
-                    s.lines().map(|l| l.trim().to_string()).filter(|l| !l.is_empty())
+                    source.lines().map(|l| l.trim().to_string()).filter(|l| !l.is_empty())
                         .map(|text| ImportEntry { text, tags: vec![] }).collect()
                 }
             };
@@ -1209,6 +1376,72 @@ async fn main() -> Result<()> {
             }
         }
 
+        // ── summarize ──────────────────────────────────────────────────────
+        Commands::Summarize { topic, tags, before, after, top } => {
+            let records = read_db(&db_file)?;
+            if records.is_empty() {
+                println!("no records found. add some with `idb put \"your text\"`");
+                return Ok(());
+            }
+            let before_ts = before.as_deref().map(parse_date).transpose()?;
+            let after_ts = after.as_deref().map(parse_date).transpose()?;
+            let filtered: Vec<&IntentRecord> = records.iter()
+                .filter(|r| matches_tags(r, &tags))
+                .filter(|r| before_ts.is_none_or(|b| r.timestamp < b))
+                .filter(|r| after_ts.is_none_or(|a| r.timestamp >= a))
+                .take(top)
+                .collect();
+            if filtered.is_empty() {
+                println!("no records match the given filters.");
+                return Ok(());
+            }
+            let context = filtered.iter().enumerate()
+                .map(|(i, r)| format!("[{}] {}", i + 1, r.text))
+                .collect::<Vec<_>>()
+                .join("\n");
+            let topic_line = topic.as_deref().unwrap_or("the stored records");
+            println!("📝 summarizing {} record(s) about \"{}\"...\n", filtered.len(), topic_line);
+            let prompt = format!(
+                "Summarize the following records about {}. \
+                 Identify key themes, patterns, and notable items. \
+                 Be concise but comprehensive.",
+                topic_line
+            );
+            let summary = ask_llm(&prompt, &context, &cli.llm_url, &cli.llm_model, &api_key).await?;
+            println!("{}\n", summary);
+            println!("{}", "─".repeat(50));
+            println!("({} records used as context)", filtered.len());
+        }
+
+        // ── cluster ────────────────────────────────────────────────────────
+        Commands::Cluster { k, tags } => {
+            let records = read_db(&db_file)?;
+            let filtered: Vec<&IntentRecord> = records.iter()
+                .filter(|r| matches_tags(r, &tags))
+                .collect();
+            if filtered.len() < 2 {
+                println!("need at least 2 records to cluster.");
+                return Ok(());
+            }
+            let k_actual = k.min(filtered.len());
+            println!("🔬 clustering {} records into {} groups...\n", filtered.len(), k_actual);
+            let vecs: Vec<Vec<f32>> = filtered.iter().map(|r| r.vector.clone()).collect();
+            let assignments = kmeans(&vecs, k_actual);
+            // Group records by cluster
+            let mut groups: Vec<Vec<&IntentRecord>> = vec![Vec::new(); k_actual];
+            for (i, &c) in assignments.iter().enumerate() {
+                groups[c].push(filtered[i]);
+            }
+            for (c, group) in groups.iter().enumerate() {
+                if group.is_empty() { continue; }
+                println!("── Group {} ({} records) ──", c + 1, group.len());
+                for rec in group {
+                    println!("  [{}...]{} {}", &rec.id[..8], format_tags(&rec.tags), rec.text);
+                }
+                println!();
+            }
+        }
+
         // ── serve ──────────────────────────────────────────────────────────
         Commands::Serve { port, host } => {
             let records = read_db(&db_file)?;
@@ -1233,6 +1466,7 @@ async fn main() -> Result<()> {
                 .route("/search", get(handle_search))
                 .route("/dedup", get(handle_dedup))
                 .route("/ask", post(handle_ask))
+                .route("/summarize", get(handle_summarize))
                 .with_state(state);
             let addr = format!("{}:{}", host, port);
             let listener = tokio::net::TcpListener::bind(&addr).await?;
@@ -1248,9 +1482,10 @@ async fn main() -> Result<()> {
             println!("  PATCH  /records/:id          update a record");
             println!("  DELETE /records/:id          delete a record");
             println!("  GET    /records/:id/related  related records (?top=5)");
-            println!("  GET    /search               search (?q=xxx&top=5&tag=xxx&before=unix&after=unix&alpha=0.7)");
+            println!("  GET    /search               search (?q=xxx&top=5&tag=xxx&before=unix&after=unix&alpha=0.7&min_score=0.7)");
             println!("  GET    /dedup                detect duplicates (?threshold=0.95)");
             println!("  POST   /ask                  ask a question (RAG)");
+            println!("  GET    /summarize            summarize records (?topic=xxx&tag=xxx&before=unix&after=unix&top=20)");
             axum::serve(listener, app).await?;
         }
     }
