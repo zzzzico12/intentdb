@@ -4,7 +4,7 @@ use anyhow::{Context, Result};
 use axum::{
     extract::{Path as AxumPath, Query, State},
     http::StatusCode,
-    response::Json,
+    response::{Html, Json},
     routing::{delete, get, post},
     Router,
 };
@@ -158,6 +158,27 @@ enum Commands {
         port: u16,
         #[arg(long, default_value = "127.0.0.1")]
         host: String,
+    },
+    /// Sync records with a remote intentdb server
+    Sync {
+        #[command(subcommand)]
+        action: SyncAction,
+    },
+}
+
+#[derive(Subcommand)]
+enum SyncAction {
+    /// Pull records from a remote server (adds records missing locally)
+    Pull {
+        /// Remote intentdb server URL, e.g. http://192.168.1.10:3000
+        #[arg(long)]
+        from: String,
+    },
+    /// Push local records to a remote server (adds records missing remotely)
+    Push {
+        /// Remote intentdb server URL, e.g. http://192.168.1.10:3000
+        #[arg(long)]
+        to: String,
     },
 }
 
@@ -959,6 +980,49 @@ async fn handle_ask(
     Ok(Json(AskResponse { answer, sources: source_responses }))
 }
 
+async fn handle_ui() -> Html<&'static str> {
+    Html(include_str!("../ui/index.html"))
+}
+
+async fn handle_export(
+    State(state): State<Arc<AppState>>,
+) -> Json<Vec<IntentRecord>> {
+    let db = state.db.lock().await;
+    Json(db.records.clone())
+}
+
+#[derive(Deserialize)]
+struct ImportBody {
+    records: Vec<IntentRecord>,
+}
+
+#[derive(Serialize)]
+struct ImportResponse {
+    added: usize,
+    total: usize,
+}
+
+async fn handle_import(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<ImportBody>,
+) -> Result<Json<ImportResponse>, AppError> {
+    let mut db = state.db.lock().await;
+    let existing: HashSet<String> = db.records.iter().map(|r| r.id.clone()).collect();
+    let new_records: Vec<IntentRecord> = body.records
+        .into_iter()
+        .filter(|r| !existing.contains(&r.id))
+        .collect();
+    let added = new_records.len();
+    for rec in new_records {
+        db.index.insert(rec.id.clone(), rec.vector.clone());
+        db.records.push(rec);
+    }
+    let total = db.records.len();
+    write_db(&state.db_path, &db.records).map_err(internal)?;
+    db.index.save(&state.hnsw_path).map_err(internal)?;
+    Ok(Json(ImportResponse { added, total }))
+}
+
 async fn handle_summarize(
     State(state): State<Arc<AppState>>,
     Query(params): Query<SummarizeQuery>,
@@ -1467,11 +1531,14 @@ async fn main() -> Result<()> {
                 .route("/dedup", get(handle_dedup))
                 .route("/ask", post(handle_ask))
                 .route("/summarize", get(handle_summarize))
+                .route("/export", get(handle_export))
+                .route("/import", post(handle_import))
+                .route("/", get(handle_ui))
                 .with_state(state);
             let addr = format!("{}:{}", host, port);
             let listener = tokio::net::TcpListener::bind(&addr).await?;
             println!("🚀 IntentDB API server started");
-            println!("   http://{}:{}", host, port);
+            println!("   Web UI:  http://{}:{}/", host, port);
             println!("   db file: {}", db_file.display());
             println!("   embedding: {} ({})", cli.embedding_model, cli.embedding_url);
             println!("   llm: {} ({})", cli.llm_model, cli.llm_url);
@@ -1488,6 +1555,54 @@ async fn main() -> Result<()> {
             println!("  GET    /summarize            summarize records (?topic=xxx&tag=xxx&before=unix&after=unix&top=20)");
             axum::serve(listener, app).await?;
         }
+        // ── sync ───────────────────────────────────────────────────────────
+        Commands::Sync { action } => match action {
+            SyncAction::Pull { from } => {
+                let from = from.trim_end_matches('/');
+                println!("⬇️  pulling from {}...", from);
+                let remote: Vec<IntentRecord> = reqwest::get(format!("{}/export", from))
+                    .await
+                    .context("failed to connect to remote")?
+                    .json()
+                    .await
+                    .context("failed to parse remote response")?;
+                let mut local = read_db(&db_file)?;
+                let existing: HashSet<&str> = local.iter().map(|r| r.id.as_str()).collect();
+                let new_records: Vec<IntentRecord> = remote
+                    .into_iter()
+                    .filter(|r| !existing.contains(r.id.as_str()))
+                    .collect();
+                let added = new_records.len();
+                if added == 0 {
+                    println!("✅ already up to date ({} records)", local.len());
+                    return Ok(());
+                }
+                local.extend(new_records);
+                write_db(&db_file, &local)?;
+                rebuild_and_save_hnsw(&db_file, &local)?;
+                println!("✅ pulled {} new records ({} total)", added, local.len());
+            }
+            SyncAction::Push { to } => {
+                let to = to.trim_end_matches('/');
+                println!("⬆️  pushing to {}...", to);
+                let local = read_db(&db_file)?;
+                let client = reqwest::Client::new();
+                #[derive(Serialize)]
+                struct PushBody<'a> { records: &'a Vec<IntentRecord> }
+                let res: serde_json::Value = client
+                    .post(format!("{}/import", to))
+                    .json(&PushBody { records: &local })
+                    .send()
+                    .await
+                    .context("failed to connect to remote")?
+                    .json()
+                    .await
+                    .context("failed to parse remote response")?;
+                let added = res["added"].as_u64().unwrap_or(0);
+                let total = res["total"].as_u64().unwrap_or(0);
+                println!("✅ pushed {} new records ({} total on remote)", added, total);
+            }
+        },
     }
 
     Ok(())

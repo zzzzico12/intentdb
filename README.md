@@ -183,6 +183,54 @@ idb --embedding-url http://localhost:11434/v1/embeddings \
 
 ---
 
+## Web UI
+
+When you run `idb serve`, a browser UI is automatically available at `http://localhost:3000/`.
+
+No separate install needed — the UI is embedded in the binary.
+
+**Tabs:**
+- **Search** — semantic search with all filters (tag, date range, α, min-score)
+- **Ask** — RAG question answering with cited sources
+- **Add** — add records with tags (Cmd+Enter to save)
+- **Browse** — list all records, filter by tag, delete individual records
+- **Summarize** — LLM summary with topic / tag / date filters
+
+---
+
+## Multi-device sync
+
+intentdb servers can sync records with each other. Each sync operation is **additive** — it only adds records that the target is missing, identified by record ID. No data is overwritten or deleted.
+
+```bash
+# Pull records from a remote server into local DB
+idb sync pull --from http://192.168.1.10:3000
+
+# Push local records to a remote server
+idb sync push --to http://192.168.1.10:3000
+
+# Two-way sync: pull first, then push
+idb sync pull --from http://192.168.1.10:3000
+idb sync push --to http://192.168.1.10:3000
+```
+
+**Typical setup:** Run `idb serve` on a shared machine (home server, VPS, etc.) and sync from each device.
+
+```bash
+# Shared server (always running)
+idb serve --host 0.0.0.0 --port 3000 --file /data/shared.idb
+
+# Device A — sync after adding records
+idb put "Meeting notes from today"
+idb sync push --to http://myserver:3000
+
+# Device B — pull before searching
+idb sync pull --from http://myserver:3000
+idb search "meeting notes"
+```
+
+---
+
 ## HTTP API
 
 intentdb also runs as a local HTTP server:
@@ -532,8 +580,8 @@ Estimated on Apple M2, 1536-dim vectors (OpenAI `text-embedding-3-small`), M=16,
 - [x] Hybrid search (`--alpha` semantic + keyword blend)
 - [x] Minimum score filter (`--min-score`)
 - [x] Namespaces (`--ns`)
-- [ ] Multi-device sync
-- [ ] Web UI
+- [x] Web UI (served at `http://localhost:3000/` when running `idb serve`)
+- [x] Multi-device sync (`idb sync push/pull`)
 
 ---
 
@@ -736,6 +784,54 @@ idb --embedding-url http://localhost:11434/v1/embeddings \
 | `IDB_EMBEDDING_MODEL` | `--embedding-model` | `text-embedding-3-small` |
 | `IDB_LLM_URL` | `--llm-url` | `https://api.openai.com/v1/chat/completions` |
 | `IDB_LLM_MODEL` | `--llm-model` | `gpt-4o-mini` |
+
+---
+
+## Web UI
+
+`idb serve` を起動すると、ブラウザUIが `http://localhost:3000/` で自動的に利用できます。
+
+UIはバイナリに埋め込まれているため、別途インストールは不要です。
+
+**タブ一覧：**
+- **Search** — タグ・日付・α・min-scoreなどすべてのフィルターに対応した意味的検索
+- **Ask** — 根拠となるソース付きのRAQ回答
+- **Add** — タグ付きでレコードを追加（Cmd+Enterで保存）
+- **Browse** — 全レコードの一覧、タグフィルター、個別削除
+- **Summarize** — トピック・タグ・日付フィルター付きのLLMサマリー
+
+---
+
+## マルチデバイス同期
+
+intentdbサーバー同士でレコードを同期できます。同期は**追加のみ**で動作し、レコードIDで重複を検出して、相手が持っていないレコードだけを追加します。データの上書きや削除は行いません。
+
+```bash
+# リモートサーバーからローカルにレコードを取り込む
+idb sync pull --from http://192.168.1.10:3000
+
+# ローカルのレコードをリモートサーバーに送る
+idb sync push --to http://192.168.1.10:3000
+
+# 双方向同期: pull してから push
+idb sync pull --from http://192.168.1.10:3000
+idb sync push --to http://192.168.1.10:3000
+```
+
+**典型的な使い方：** 共有マシン（自宅サーバー、VPSなど）で `idb serve` を常時起動し、各デバイスから sync。
+
+```bash
+# 共有サーバー（常時起動）
+idb serve --host 0.0.0.0 --port 3000 --file /data/shared.idb
+
+# デバイスA — レコード追加後に push
+idb put "今日の会議のメモ"
+idb sync push --to http://myserver:3000
+
+# デバイスB — 検索前に pull
+idb sync pull --from http://myserver:3000
+idb search "会議のメモ"
+```
 
 ---
 

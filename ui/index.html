@@ -1,0 +1,504 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>intentdb</title>
+  <style>
+    :root {
+      --bg:        #0f1117;
+      --card:      #161b27;
+      --border:    #252a38;
+      --accent:    #818cf8;
+      --accent-bg: #1e1b4b44;
+      --accent-dim:#3730a3;
+      --text:      #e2e8f0;
+      --muted:     #64748b;
+      --green:     #4ade80;
+      --yellow:    #fbbf24;
+      --red:       #f87171;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      background: var(--bg); color: var(--text);
+      font-family: system-ui, -apple-system, sans-serif;
+      font-size: 14px; line-height: 1.6;
+    }
+    .wrap { max-width: 900px; margin: 0 auto; padding: 0 20px; }
+
+    /* ── Header ── */
+    header {
+      border-bottom: 1px solid var(--border);
+      padding: 14px 0;
+      display: flex; align-items: center; gap: 12px;
+    }
+    header h1 { font-size: 18px; font-weight: 700; letter-spacing: -0.5px; }
+    header .tagline { color: var(--muted); font-size: 12px; }
+    header .stats { margin-left: auto; color: var(--muted); font-size: 12px; }
+
+    /* ── Tabs ── */
+    .tabs {
+      display: flex; gap: 4px;
+      padding: 10px 0; border-bottom: 1px solid var(--border);
+    }
+    .tab {
+      background: none; border: 1px solid transparent;
+      color: var(--muted); padding: 5px 14px; border-radius: 6px;
+      cursor: pointer; font-size: 13px; transition: all 0.15s;
+    }
+    .tab:hover { color: var(--text); border-color: var(--border); }
+    .tab.active { color: var(--accent); border-color: var(--accent-dim); background: var(--accent-bg); }
+
+    /* ── Panels ── */
+    .panel { display: none; padding: 20px 0; }
+    .panel.active { display: block; }
+
+    /* ── Form elements ── */
+    input[type="text"], input[type="number"], textarea, select {
+      background: var(--card); border: 1px solid var(--border);
+      color: var(--text); padding: 8px 12px; border-radius: 6px;
+      font-size: 14px; outline: none; transition: border-color 0.15s;
+      font-family: inherit;
+    }
+    input[type="text"]:focus, textarea:focus, input[type="number"]:focus {
+      border-color: var(--accent);
+    }
+    textarea { width: 100%; resize: vertical; min-height: 90px; }
+
+    .row { display: flex; gap: 8px; align-items: flex-start; }
+    .row input[type="text"] { flex: 1; }
+
+    button.primary {
+      background: var(--accent); border: none; color: #fff;
+      padding: 8px 18px; border-radius: 6px; cursor: pointer;
+      font-size: 13px; font-weight: 500; transition: opacity 0.15s;
+      white-space: nowrap; flex-shrink: 0;
+    }
+    button.primary:hover { opacity: 0.85; }
+    button.primary:disabled { opacity: 0.4; cursor: not-allowed; }
+
+    button.ghost {
+      background: none; border: 1px solid var(--border); color: var(--muted);
+      padding: 5px 12px; border-radius: 6px; cursor: pointer;
+      font-size: 12px; transition: all 0.15s;
+    }
+    button.ghost:hover { border-color: var(--accent); color: var(--accent); }
+
+    button.danger {
+      background: none; border: 1px solid transparent; color: var(--muted);
+      padding: 3px 8px; border-radius: 5px; cursor: pointer;
+      font-size: 12px; transition: all 0.15s;
+    }
+    button.danger:hover { border-color: #7f1d1d; color: var(--red); }
+
+    /* ── Filters bar ── */
+    .filters {
+      display: flex; gap: 10px; flex-wrap: wrap; align-items: center;
+      margin-top: 10px; padding: 10px 12px;
+      background: var(--card); border: 1px solid var(--border); border-radius: 6px;
+    }
+    .fg { display: flex; align-items: center; gap: 6px; }
+    .fg label { color: var(--muted); font-size: 11px; white-space: nowrap; }
+    .fg input { width: 90px; font-size: 12px; padding: 4px 8px; }
+    .fg input.wide { width: 120px; }
+    .fg input.narrow { width: 60px; }
+
+    /* ── Results ── */
+    .results { margin-top: 14px; display: flex; flex-direction: column; gap: 8px; }
+
+    .card {
+      background: var(--card); border: 1px solid var(--border);
+      border-radius: 8px; padding: 13px 15px;
+      transition: border-color 0.15s;
+    }
+    .card:hover { border-color: var(--accent-dim); }
+
+    .card-top { display: flex; align-items: flex-start; gap: 10px; }
+    .card-body { flex: 1; line-height: 1.55; word-break: break-word; }
+
+    .badge {
+      font-size: 11px; font-weight: 600; padding: 2px 7px;
+      border-radius: 4px; white-space: nowrap; flex-shrink: 0; margin-top: 2px;
+    }
+    .score-high { background: #14532d33; color: var(--green);  border: 1px solid #14532d; }
+    .score-mid  { background: #78350f33; color: var(--yellow); border: 1px solid #78350f; }
+    .score-low  { background: #7f1d1d33; color: var(--red);    border: 1px solid #7f1d1d; }
+
+    .card-meta {
+      display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+      margin-top: 8px;
+    }
+    .mono { font-family: monospace; font-size: 11px; color: var(--muted); }
+    .date { font-size: 11px; color: var(--muted); }
+
+    .tag {
+      font-size: 11px; padding: 1px 8px; border-radius: 3px;
+      background: #1e1b4b; color: var(--accent); border: 1px solid var(--accent-dim);
+    }
+    .card-actions { margin-left: auto; flex-shrink: 0; }
+
+    /* ── Answer card ── */
+    .answer {
+      background: #0f2a1a; border: 1px solid #14532d;
+      border-radius: 8px; padding: 16px; line-height: 1.75; margin-bottom: 14px;
+    }
+    .answer-label {
+      font-size: 11px; color: var(--green); font-weight: 600;
+      letter-spacing: 0.5px; margin-bottom: 8px;
+    }
+
+    /* ── Summary card ── */
+    .summary {
+      background: var(--card); border: 1px solid var(--border);
+      border-radius: 8px; padding: 16px; line-height: 1.75;
+    }
+    .summary-meta { font-size: 11px; color: var(--muted); margin-top: 10px; }
+
+    /* ── Section label ── */
+    .sec {
+      font-size: 11px; color: var(--muted); font-weight: 600;
+      letter-spacing: 0.5px; text-transform: uppercase; margin-bottom: 10px;
+    }
+
+    /* ── Status/feedback ── */
+    .empty  { color: var(--muted); text-align: center; padding: 36px 0; font-size: 13px; }
+    .err    { color: var(--red); background: #7f1d1d22; border: 1px solid #7f1d1d55;
+              border-radius: 6px; padding: 10px 14px; font-size: 13px; margin-top: 10px; }
+    .ok-msg { color: var(--green); font-size: 13px; margin-top: 10px; }
+
+    /* ── Spinner ── */
+    @keyframes spin { to { transform: rotate(360deg); } }
+    .spinner {
+      display: inline-block; width: 14px; height: 14px;
+      border: 2px solid var(--border); border-top-color: var(--accent);
+      border-radius: 50%; animation: spin 0.6s linear infinite;
+      vertical-align: middle; margin-right: 6px;
+    }
+    .loading { color: var(--muted); text-align: center; padding: 36px 0; }
+
+    /* ── Toast ── */
+    .toast {
+      position: fixed; bottom: 20px; right: 20px;
+      background: var(--card); border: 1px solid var(--border);
+      padding: 10px 16px; border-radius: 8px; font-size: 13px;
+      opacity: 0; transition: opacity 0.2s; pointer-events: none; z-index: 100;
+    }
+    .toast.show { opacity: 1; }
+    .toast.ok  { border-color: #14532d; color: var(--green); }
+    .toast.err { border-color: #7f1d1d; color: var(--red); }
+  </style>
+</head>
+<body>
+
+<div class="wrap">
+  <header>
+    <h1>intentdb</h1>
+    <span class="tagline">schema-free · intent-native</span>
+    <span class="stats" id="stats">—</span>
+  </header>
+
+  <div class="tabs">
+    <button class="tab active" onclick="tab('search')">Search</button>
+    <button class="tab" onclick="tab('ask')">Ask</button>
+    <button class="tab" onclick="tab('add')">Add</button>
+    <button class="tab" onclick="tab('browse')">Browse</button>
+    <button class="tab" onclick="tab('summarize')">Summarize</button>
+  </div>
+
+  <!-- ─── SEARCH ─── -->
+  <div class="panel active" id="p-search">
+    <div class="row">
+      <input type="text" id="s-q" placeholder="Search in plain language — e.g. 'customers with billing issues'" onkeydown="k(event,'doSearch')">
+      <button class="primary" onclick="doSearch()">Search</button>
+    </div>
+    <div class="filters">
+      <div class="fg"><label>tag</label><input id="s-tag" class="wide" placeholder="urgent"></div>
+      <div class="fg"><label>after</label><input id="s-after" class="wide" placeholder="2024-01-01"></div>
+      <div class="fg"><label>before</label><input id="s-before" class="wide" placeholder="2024-12-31"></div>
+      <div class="fg"><label>α</label><input id="s-alpha" class="narrow" type="number" value="1" min="0" max="1" step="0.1" title="1.0=semantic, 0.0=keyword"></div>
+      <div class="fg"><label>min score</label><input id="s-min" class="narrow" type="number" value="0" min="0" max="1" step="0.05"></div>
+      <div class="fg"><label>top</label><input id="s-top" class="narrow" type="number" value="10" min="1" max="100"></div>
+    </div>
+    <div id="s-out" class="results"></div>
+  </div>
+
+  <!-- ─── ASK ─── -->
+  <div class="panel" id="p-ask">
+    <div class="row">
+      <input type="text" id="a-q" placeholder="Ask a question — e.g. 'What were the main support issues last month?'" onkeydown="k(event,'doAsk')">
+      <button class="primary" onclick="doAsk()">Ask</button>
+    </div>
+    <div class="filters">
+      <div class="fg"><label>context records</label><input id="a-top" class="narrow" type="number" value="5" min="1" max="20"></div>
+    </div>
+    <div id="a-out" style="margin-top:16px;"></div>
+  </div>
+
+  <!-- ─── ADD ─── -->
+  <div class="panel" id="p-add">
+    <div class="sec">New record</div>
+    <textarea id="n-text" placeholder="Type anything — customer notes, bug reports, decisions, ideas...&#10;&#10;Cmd+Enter to save"></textarea>
+    <div class="row" style="margin-top:10px;">
+      <input type="text" id="n-tags" placeholder="Tags (comma-separated): bug, urgent, customer-a">
+      <button class="primary" id="n-btn" onclick="doAdd()">Add record</button>
+    </div>
+    <div id="n-out"></div>
+  </div>
+
+  <!-- ─── BROWSE ─── -->
+  <div class="panel" id="p-browse">
+    <div class="row" style="margin-bottom:12px;">
+      <input type="text" id="b-tag" placeholder="Filter by tag..." style="width:200px" oninput="doBrowse()">
+      <span id="b-count" style="color:var(--muted);font-size:12px;line-height:36px;"></span>
+      <button class="ghost" style="margin-left:auto;" onclick="doBrowse()">Refresh</button>
+    </div>
+    <div id="b-out" class="results"></div>
+  </div>
+
+  <!-- ─── SUMMARIZE ─── -->
+  <div class="panel" id="p-summarize">
+    <div class="row">
+      <input type="text" id="u-topic" placeholder="Focus topic (optional) — e.g. 'billing issues', 'deployment incidents'" onkeydown="k(event,'doSummarize')">
+      <button class="primary" onclick="doSummarize()">Summarize</button>
+    </div>
+    <div class="filters">
+      <div class="fg"><label>tag</label><input id="u-tag" class="wide" placeholder="support"></div>
+      <div class="fg"><label>after</label><input id="u-after" class="wide" placeholder="2024-01-01"></div>
+      <div class="fg"><label>before</label><input id="u-before" class="wide" placeholder="2024-12-31"></div>
+      <div class="fg"><label>max records</label><input id="u-top" class="narrow" type="number" value="20" min="1" max="200"></div>
+    </div>
+    <div id="u-out" style="margin-top:16px;"></div>
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+const TABS = ['search','ask','add','browse','summarize'];
+
+// ── Tab switching ─────────────────────────────────────────────────────────────
+function tab(name) {
+  document.querySelectorAll('.tab').forEach((el, i) =>
+    el.classList.toggle('active', TABS[i] === name));
+  document.querySelectorAll('.panel').forEach(el =>
+    el.classList.toggle('active', el.id === 'p-' + name));
+  if (name === 'browse') doBrowse();
+}
+
+// ── Keyboard shortcut (Enter) ─────────────────────────────────────────────────
+function k(e, fn) { if (e.key === 'Enter') window[fn](); }
+
+// ── Toast ─────────────────────────────────────────────────────────────────────
+let _tt;
+function toast(msg, type = 'ok') {
+  const el = document.getElementById('toast');
+  el.textContent = msg; el.className = 'toast show ' + type;
+  clearTimeout(_tt); _tt = setTimeout(() => el.classList.remove('show'), 3000);
+}
+
+// ── Utilities ─────────────────────────────────────────────────────────────────
+function esc(s) {
+  return String(s)
+    .replace(/&/g,'&amp;').replace(/</g,'&lt;')
+    .replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+function nl(s) { return esc(s).replace(/\n/g,'<br>'); }
+function date(ts) {
+  return new Date(ts * 1000).toLocaleDateString('en-US',
+    { year:'numeric', month:'short', day:'numeric' });
+}
+function scoreClass(s) {
+  return s >= 0.8 ? 'score-high' : s >= 0.6 ? 'score-mid' : 'score-low';
+}
+function chips(tags) {
+  return (tags||[]).map(t => `<span class="tag">${esc(t)}</span>`).join(' ');
+}
+function toUnix(s) {
+  if (!s) return null;
+  const d = new Date(s + 'T00:00:00Z');
+  return isNaN(d) ? null : Math.floor(d.getTime() / 1000);
+}
+function loading(id) {
+  document.getElementById(id).innerHTML =
+    '<div class="loading"><span class="spinner"></span>Loading…</div>';
+}
+function err(id, msg) {
+  document.getElementById(id).innerHTML = `<div class="err">${esc(msg)}</div>`;
+}
+
+// ── Record card ────────────────────────────────────────────────────────────────
+function card(r, showScore) {
+  const score = showScore && r.score != null
+    ? `<span class="badge ${scoreClass(r.score)}">${r.score.toFixed(3)}</span>` : '';
+  return `
+    <div class="card" data-id="${r.id}">
+      <div class="card-top">
+        ${score}
+        <span class="card-body">${nl(r.text)}</span>
+        <div class="card-actions">
+          <button class="danger" onclick="del('${r.id}',this)" title="Delete">✕</button>
+        </div>
+      </div>
+      <div class="card-meta">
+        <span class="mono">${r.id.slice(0,8)}…</span>
+        <span class="date">${date(r.timestamp)}</span>
+        ${chips(r.tags)}
+      </div>
+    </div>`;
+}
+
+// ── Stats ──────────────────────────────────────────────────────────────────────
+async function loadStats() {
+  try {
+    const data = await fetch('/records').then(r => r.json());
+    document.getElementById('stats').textContent =
+      `${Array.isArray(data) ? data.length : 0} records`;
+  } catch { document.getElementById('stats').textContent = 'offline'; }
+}
+
+// ── Search ────────────────────────────────────────────────────────────────────
+async function doSearch() {
+  const q = document.getElementById('s-q').value.trim();
+  if (!q) return;
+  loading('s-out');
+
+  const p = new URLSearchParams({ q });
+  const tag   = document.getElementById('s-tag').value.trim();
+  const after  = toUnix(document.getElementById('s-after').value.trim());
+  const before = toUnix(document.getElementById('s-before').value.trim());
+  const alpha  = document.getElementById('s-alpha').value;
+  const min    = document.getElementById('s-min').value;
+  const top    = document.getElementById('s-top').value;
+
+  if (tag)    p.append('tag', tag);
+  if (after)  p.append('after', after);
+  if (before) p.append('before', before);
+  if (alpha)  p.append('alpha', alpha);
+  if (min)    p.append('min_score', min);
+  if (top)    p.append('top', top);
+
+  try {
+    const rows = await fetch('/search?' + p).then(r => r.json());
+    const el = document.getElementById('s-out');
+    if (!rows.length) { el.innerHTML = '<div class="empty">No results found.</div>'; return; }
+    el.innerHTML = rows.map(r => card(r, true)).join('');
+  } catch (e) { err('s-out', e.message); }
+}
+
+// ── Ask ───────────────────────────────────────────────────────────────────────
+async function doAsk() {
+  const q = document.getElementById('a-q').value.trim();
+  if (!q) return;
+  loading('a-out');
+  const top = parseInt(document.getElementById('a-top').value) || 5;
+
+  try {
+    const res = await fetch('/ask', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ question: q, top }),
+    }).then(r => r.json());
+
+    let html = `
+      <div class="answer">
+        <div class="answer-label">ANSWER</div>
+        ${nl(res.answer)}
+      </div>`;
+    if (res.sources && res.sources.length) {
+      html += `<div class="sec">Sources (${res.sources.length})</div>`;
+      html += res.sources.map(r => card(r, false)).join('');
+    }
+    document.getElementById('a-out').innerHTML = html;
+  } catch (e) { err('a-out', e.message); }
+}
+
+// ── Add ───────────────────────────────────────────────────────────────────────
+async function doAdd() {
+  const text = document.getElementById('n-text').value.trim();
+  if (!text) return;
+  const btn  = document.getElementById('n-btn');
+  const tagsRaw = document.getElementById('n-tags').value.trim();
+  const tags = tagsRaw ? tagsRaw.split(',').map(t => t.trim()).filter(Boolean) : [];
+
+  btn.disabled = true; btn.textContent = 'Saving…';
+  document.getElementById('n-out').innerHTML = '';
+
+  try {
+    const res = await fetch('/records', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ text, tags }),
+    }).then(r => r.json());
+
+    document.getElementById('n-text').value = '';
+    document.getElementById('n-tags').value = '';
+    toast(`Saved — id: ${res.id.slice(0,8)}…`);
+    loadStats();
+  } catch (e) { err('n-out', e.message); }
+  finally { btn.disabled = false; btn.textContent = 'Add record'; }
+}
+
+// ── Browse ────────────────────────────────────────────────────────────────────
+async function doBrowse() {
+  loading('b-out');
+  const tag = document.getElementById('b-tag').value.trim();
+  const p = new URLSearchParams();
+  if (tag) p.append('tag', tag);
+
+  try {
+    const rows = await fetch('/records?' + p).then(r => r.json());
+    document.getElementById('b-count').textContent = `${rows.length} records`;
+    const el = document.getElementById('b-out');
+    if (!rows.length) { el.innerHTML = '<div class="empty">No records found.</div>'; return; }
+    el.innerHTML = rows.slice().reverse().map(r => card(r, false)).join('');
+  } catch (e) { err('b-out', e.message); }
+}
+
+// ── Delete ────────────────────────────────────────────────────────────────────
+async function del(id, btn) {
+  if (!confirm('Delete this record?')) return;
+  try {
+    await fetch('/records/' + id, { method: 'DELETE' });
+    const el = btn.closest('.card');
+    el.style.transition = 'opacity 0.2s';
+    el.style.opacity = '0';
+    setTimeout(() => el.remove(), 200);
+    loadStats();
+    toast('Deleted');
+  } catch (e) { toast(e.message, 'err'); }
+}
+
+// ── Summarize ─────────────────────────────────────────────────────────────────
+async function doSummarize() {
+  loading('u-out');
+  const p = new URLSearchParams();
+  const topic  = document.getElementById('u-topic').value.trim();
+  const tag    = document.getElementById('u-tag').value.trim();
+  const after  = toUnix(document.getElementById('u-after').value.trim());
+  const before = toUnix(document.getElementById('u-before').value.trim());
+  const top    = document.getElementById('u-top').value;
+
+  if (topic)  p.append('topic', topic);
+  if (tag)    p.append('tag', tag);
+  if (after)  p.append('after', after);
+  if (before) p.append('before', before);
+  if (top)    p.append('top', top);
+
+  try {
+    const res = await fetch('/summarize?' + p).then(r => r.json());
+    document.getElementById('u-out').innerHTML = `
+      <div class="summary">
+        ${nl(res.summary)}
+        <div class="summary-meta">${res.record_count} records used as context</div>
+      </div>`;
+  } catch (e) { err('u-out', e.message); }
+}
+
+// ── Init ──────────────────────────────────────────────────────────────────────
+loadStats();
+document.getElementById('n-text').addEventListener('keydown', e => {
+  if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) doAdd();
+});
+</script>
+</body>
+</html>
