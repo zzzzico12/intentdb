@@ -213,6 +213,7 @@
     <button class="tab" onclick="tab('add')">Add</button>
     <button class="tab" onclick="tab('browse')">Browse</button>
     <button class="tab" onclick="tab('summarize')">Summarize</button>
+    <button class="tab" onclick="tab('timeline')">Timeline</button>
   </div>
 
   <!-- ─── SEARCH ─── -->
@@ -265,6 +266,14 @@
     <div id="b-out" class="results"></div>
   </div>
 
+  <!-- ─── TIMELINE ─── -->
+  <div class="panel" id="p-timeline">
+    <div class="row" style="margin-bottom:12px;">
+      <button class="ghost" style="margin-left:auto;" onclick="doTimeline()">Refresh</button>
+    </div>
+    <div id="tl-out"></div>
+  </div>
+
   <!-- ─── SUMMARIZE ─── -->
   <div class="panel" id="p-summarize">
     <div class="row">
@@ -284,7 +293,7 @@
 <div class="toast" id="toast"></div>
 
 <script>
-const TABS = ['search','ask','add','browse','summarize'];
+const TABS = ['search','ask','add','browse','summarize','timeline'];
 
 // ── Tab switching ─────────────────────────────────────────────────────────────
 function tab(name) {
@@ -293,6 +302,7 @@ function tab(name) {
   document.querySelectorAll('.panel').forEach(el =>
     el.classList.toggle('active', el.id === 'p-' + name));
   if (name === 'browse') doBrowse();
+  if (name === 'timeline') doTimeline();
 }
 
 // ── Keyboard shortcut (Enter) ─────────────────────────────────────────────────
@@ -345,15 +355,40 @@ async function apiFetch(url, opts) {
   catch { throw new Error(text || 'Invalid response from server'); }
 }
 
+// ── Hook JSON parser ──────────────────────────────────────────────────────────
+function parseHookText(text, tags) {
+  try {
+    const v = JSON.parse(text);
+    if (v.hook_event_name === 'UserPromptSubmit') {
+      return { label: 'User', text: v.prompt || text, session: v.session_id };
+    }
+    if (v.hook_event_name === 'Stop') {
+      return { label: 'Claude', text: v.response || text, session: v.session_id };
+    }
+  } catch {}
+  // Legacy plain-text response
+  if (Array.isArray(tags) && tags.includes('response')) {
+    return { label: 'Claude', text, session: null };
+  }
+  return null;
+}
+
 // ── Record card ────────────────────────────────────────────────────────────────
 function card(r, showScore) {
   const score = showScore && r.score != null
     ? `<span class="badge ${scoreClass(r.score)}">${r.score.toFixed(3)}</span>` : '';
+  const hook = parseHookText(r.text, r.tags);
+  const displayText = hook ? hook.text : r.text;
+  const roleLabel = hook
+    ? `<span style="font-size:11px;font-weight:600;color:${hook.label==='User'?'var(--accent)':'#4caf8a'};margin-right:6px;">[${hook.label}]</span>`
+    : '';
+  const sessionBadge = hook && hook.session
+    ? `<span style="font-size:10px;color:var(--muted);font-family:monospace">${hook.session.slice(0,8)}</span>` : '';
   return `
     <div class="card" data-id="${r.id}">
       <div class="card-top">
         ${score}
-        <span class="card-body">${nl(r.text)}</span>
+        <span class="card-body">${roleLabel}${nl(displayText)}</span>
         <div class="card-actions">
           <button class="danger" onclick="del('${r.id}',this)" title="Delete">✕</button>
         </div>
@@ -361,6 +396,7 @@ function card(r, showScore) {
       <div class="card-meta">
         <span class="mono">${r.id.slice(0,8)}…</span>
         <span class="date">${date(r.timestamp)}</span>
+        ${sessionBadge}
         ${chips(r.tags)}
       </div>
     </div>`;
@@ -515,6 +551,30 @@ async function doSummarize() {
         <div class="summary-meta">${res.record_count} records used as context</div>
       </div>`;
   } catch (e) { err('u-out', e.message); }
+}
+
+// ── Timeline ──────────────────────────────────────────────────────────────────
+async function doTimeline() {
+  loading('tl-out');
+  try {
+    const rows = await apiFetch('/timeline');
+    const el = document.getElementById('tl-out');
+    if (!rows.length) { el.innerHTML = '<div class="empty">No timeline entries found.</div>'; return; }
+    el.innerHTML = rows.map(r => {
+      const isUser = r.role === 'user';
+      const label = isUser ? 'User' : 'Claude';
+      const color = isUser ? 'var(--accent)' : '#4caf8a';
+      const text = nl(r.text);
+      return `<div class="card" style="border-left:3px solid ${color};margin-bottom:8px;">
+        <div style="display:flex;gap:8px;align-items:baseline;margin-bottom:6px;">
+          <span style="color:${color};font-weight:600;font-size:12px;">[${label}]</span>
+          <span style="color:var(--muted);font-size:11px;">${date(r.timestamp)}</span>
+          ${r.session_id ? `<span style="color:var(--muted);font-size:10px;font-family:monospace">${r.session_id.slice(0,8)}</span>` : ''}
+        </div>
+        <div style="font-size:13px;line-height:1.6;white-space:pre-wrap;">${text}</div>
+      </div>`;
+    }).join('');
+  } catch (e) { err('tl-out', e.message); }
 }
 
 // ── Init ──────────────────────────────────────────────────────────────────────

@@ -195,6 +195,7 @@ No separate install needed — the UI is embedded in the binary.
 - **Add** — add records with tags (Cmd+Enter to save)
 - **Browse** — list all records, filter by tag, delete individual records
 - **Summarize** — LLM summary with topic / tag / date filters
+- **Timeline** — conversation history view: User prompts and Claude responses interleaved chronologically
 
 ---
 
@@ -277,6 +278,9 @@ curl "http://localhost:3000/records/<id>/related?top=5"
 
 # Duplicate detection
 curl "http://localhost:3000/dedup?threshold=0.95"
+
+# Timeline — User prompts and Claude responses interleaved chronologically
+curl "http://localhost:3000/timeline"
 ```
 
 ### Python client
@@ -387,6 +391,28 @@ idb list
 idb list --tag urgent
 idb --ns sales list
 ```
+
+---
+
+### `idb timeline`
+
+Display stored User prompts and Claude responses interleaved in chronological order. Useful for reviewing conversation history captured via Claude Code hooks.
+
+Records are automatically classified:
+- **[User]** — records stored by the `UserPromptSubmit` hook (JSON with `hook_event_name: "UserPromptSubmit"`)
+- **[Claude]** — records stored by the `Stop` hook (tagged `response`)
+- Notes and other records are hidden by default
+
+**When to use:** When you want to review the conversation history that was captured, debug what was stored, or trace back a specific session.
+
+```bash
+idb timeline                        # show all sessions, oldest first
+idb timeline --limit 20             # show the last 20 entries
+idb timeline --session abc123       # filter by session ID prefix
+idb timeline --show-notes           # also show unclassified records
+```
+
+Also available as `GET /timeline` in the HTTP API and as a **Timeline** tab in the Web UI.
 
 ---
 
@@ -582,6 +608,8 @@ Estimated on Apple M2, 1536-dim vectors (OpenAI `text-embedding-3-small`), M=16,
 - [x] Namespaces (`--ns`)
 - [x] Web UI (served at `http://localhost:3000/` when running `idb serve`)
 - [x] Multi-device sync (`idb sync push/pull`)
+- [x] `timeline` command — conversation history view (User + Claude interleaved chronologically)
+- [x] MCP server (`idb mcp`) — native Claude Code integration via Model Context Protocol
 
 ---
 
@@ -799,6 +827,7 @@ UIはバイナリに埋め込まれているため、別途インストールは
 - **Add** — タグ付きでレコードを追加（Cmd+Enterで保存）
 - **Browse** — 全レコードの一覧、タグフィルター、個別削除
 - **Summarize** — トピック・タグ・日付フィルター付きのLLMサマリー
+- **Timeline** — ユーザープロンプトとClaudeの回答を時系列で交互表示する会話履歴ビュー
 
 ---
 
@@ -881,6 +910,9 @@ curl "http://localhost:3000/records/<id>/related?top=5"
 
 # 重複検出
 curl "http://localhost:3000/dedup?threshold=0.95"
+
+# タイムライン — ユーザープロンプトとClaudeの回答を時系列で交互表示
+curl "http://localhost:3000/timeline"
 ```
 
 ### Python クライアント
@@ -991,6 +1023,28 @@ idb list
 idb list --tag urgent
 idb --ns sales list
 ```
+
+---
+
+### `idb timeline`
+
+保存されたユーザープロンプトとClaudeの回答を、時系列で交互に表示します。Claude Codeのフックで自動保存された会話履歴を確認するのに便利です。
+
+レコードは自動的に分類されます：
+- **[User]** — `UserPromptSubmit` フックで保存されたレコード（`hook_event_name: "UserPromptSubmit"` のJSON）
+- **[Claude]** — `Stop` フックで保存されたレコード（`response` タグ付き）
+- その他のレコードはデフォルトで非表示
+
+**使いどころ：** 保存された会話履歴を振り返る、何が記録されているかデバッグする、特定セッションの流れを追う。
+
+```bash
+idb timeline                        # 全セッションを古い順に表示
+idb timeline --limit 20             # 最新20件を表示
+idb timeline --session abc123       # セッションIDのプレフィックスで絞り込み
+idb timeline --show-notes           # 未分類レコードも表示
+```
+
+HTTP APIでは `GET /timeline`、Web UIでは **Timeline** タブからも利用できます。
 
 ---
 
@@ -1184,8 +1238,10 @@ Apple M2、1536次元ベクトル（OpenAI `text-embedding-3-small`）、M=16、
 - [x] ハイブリッド検索（`--alpha` 意味的類似度 + キーワード）
 - [x] 最小スコアフィルター（`--min-score`）
 - [x] ネームスペース（`--ns`）
-- [ ] マルチデバイス同期
-- [ ] Web UI
+- [x] マルチデバイス同期（`idb sync push/pull`）
+- [x] Web UI（`idb serve` で `http://localhost:3000/` に自動表示）
+- [x] `timeline` コマンド — ユーザープロンプトとClaudeの回答を時系列表示
+- [x] MCPサーバー（`idb mcp`） — Model Context Protocol経由のClaude Code統合
 
 ---
 

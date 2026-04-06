@@ -1,4 +1,5 @@
 mod hnsw;
+mod mcp;
 
 use anyhow::{Context, Result};
 use axum::{
@@ -130,6 +131,18 @@ enum Commands {
         #[arg(short, long = "tag")]
         tags: Vec<String>,
     },
+    /// Show prompts and Claude responses interleaved chronologically
+    Timeline {
+        /// Filter by session ID prefix
+        #[arg(long)]
+        session: Option<String>,
+        /// Maximum entries to display
+        #[arg(short, long)]
+        limit: Option<usize>,
+        /// Also show Note-type records (raw text, neither prompt nor response)
+        #[arg(long)]
+        show_notes: bool,
+    },
     /// Delete a record (id prefix)
     Delete { id: String },
     /// Bulk import from JSON / CSV / TXT
@@ -159,6 +172,8 @@ enum Commands {
         #[arg(long, default_value = "127.0.0.1")]
         host: String,
     },
+    /// Start MCP stdio server (for Claude Code / AI assistant integration)
+    Mcp,
     /// Sync records with a remote intentdb server
     Sync {
         #[command(subcommand)]
@@ -368,6 +383,67 @@ fn now_secs() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_secs()
+}
+
+/// Format a Unix timestamp (seconds) as "YYYY-MM-DD HH:MM:SS" UTC.
+fn format_ts(ts: u64) -> String {
+    let secs_in_day = 86400u64;
+    let time_of_day = ts % secs_in_day;
+    let days = ts / secs_in_day;
+    let hh = time_of_day / 3600;
+    let mm = (time_of_day % 3600) / 60;
+    let ss = time_of_day % 60;
+    let z = days as i64 + 719468;
+    let era = if z >= 0 { z } else { z - 146096 } / 146097;
+    let doe = z - era * 146097;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if m <= 2 { y + 1 } else { y };
+    format!("{:04}-{:02}-{:02} {:02}:{:02}:{:02}", y, m, d, hh, mm, ss)
+}
+
+/// Truncate a string to max_chars Unicode characters, appending '…' if truncated.
+fn truncate(s: &str, max_chars: usize) -> String {
+    let mut chars = s.chars();
+    let prefix: String = chars.by_ref().take(max_chars).collect();
+    if chars.next().is_some() {
+        format!("{}…", prefix)
+    } else {
+        prefix
+    }
+}
+
+pub enum TimelineEntry {
+    User { prompt: String, session_id: Option<String> },
+    Claude { text: String, session_id: Option<String> },
+    Note { text: String },
+}
+
+pub fn classify_record(rec: &IntentRecord) -> TimelineEntry {
+    if rec.tags.iter().any(|t| t == "response") {
+        // New format: JSON with hook_event_name == "Stop"
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&rec.text) {
+            if v.get("hook_event_name").and_then(|h| h.as_str()) == Some("Stop") {
+                let text = v.get("response").and_then(|r| r.as_str()).unwrap_or("").to_string();
+                let session_id = v.get("session_id").and_then(|s| s.as_str()).map(|s| s.to_string());
+                return TimelineEntry::Claude { text, session_id };
+            }
+        }
+        // Legacy format: plain text
+        return TimelineEntry::Claude { text: rec.text.clone(), session_id: None };
+    }
+    if let Ok(v) = serde_json::from_str::<serde_json::Value>(&rec.text) {
+        if v.get("hook_event_name").and_then(|h| h.as_str()) == Some("UserPromptSubmit") {
+            let prompt = v.get("prompt").and_then(|p| p.as_str()).unwrap_or("<no prompt>").to_string();
+            let session_id = v.get("session_id").and_then(|s| s.as_str()).map(|s| s.to_string());
+            return TimelineEntry::User { prompt, session_id };
+        }
+    }
+    TimelineEntry::Note { text: rec.text.clone() }
 }
 
 /// Fraction of query tokens found in text (case-insensitive).
@@ -808,6 +884,34 @@ async fn handle_list(
         .filter(|r| matches_tags(r, &filter.tag))
         .map(RecordResponse::from)
         .collect();
+    Ok(Json(result))
+}
+
+async fn handle_timeline(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<Vec<serde_json::Value>>, AppError> {
+    let db = state.db.lock().await;
+    let mut sorted: Vec<&IntentRecord> = db.records.iter().collect();
+    sorted.sort_by_key(|r| r.timestamp);
+    let result = sorted.into_iter().filter_map(|rec| {
+        match classify_record(rec) {
+            TimelineEntry::User { prompt, session_id } => Some(serde_json::json!({
+                "role": "user",
+                "timestamp": rec.timestamp,
+                "session_id": session_id,
+                "text": prompt,
+                "id": rec.id,
+            })),
+            TimelineEntry::Claude { text, session_id } => Some(serde_json::json!({
+                "role": "claude",
+                "timestamp": rec.timestamp,
+                "session_id": session_id,
+                "text": text,
+                "id": rec.id,
+            })),
+            TimelineEntry::Note { .. } => None,
+        }
+    }).collect();
     Ok(Json(result))
 }
 
@@ -1292,6 +1396,59 @@ async fn main() -> Result<()> {
             }
         }
 
+        // ── timeline ───────────────────────────────────────────────────────
+        Commands::Timeline { session, limit, show_notes } => {
+            let records = read_db(&db_file)?;
+            if records.is_empty() {
+                println!("no records found.");
+                return Ok(());
+            }
+            let mut sorted: Vec<&IntentRecord> = records.iter().collect();
+            sorted.sort_by_key(|r| r.timestamp);
+
+            let entries: Vec<(&IntentRecord, TimelineEntry)> = sorted
+                .into_iter()
+                .filter_map(|rec| {
+                    let entry = classify_record(rec);
+                    if let Some(ref sid) = session {
+                        let keep = match &entry {
+                            TimelineEntry::User { session_id: Some(s), .. } => s.starts_with(sid.as_str()),
+                            TimelineEntry::User { session_id: None, .. } => false,
+                            TimelineEntry::Claude { session_id: Some(s), .. } => s.starts_with(sid.as_str()),
+                            TimelineEntry::Claude { session_id: None, .. } => true, // legacy: show anyway
+                            TimelineEntry::Note { .. } => false,
+                        };
+                        if !keep { return None; }
+                    }
+                    match &entry {
+                        TimelineEntry::Note { .. } if !show_notes => None,
+                        _ => Some((rec, entry)),
+                    }
+                })
+                .collect();
+
+            let take_n = limit.unwrap_or(entries.len());
+            println!("Timeline ({} entries{})",
+                entries.len(),
+                session.as_deref().map(|s| format!(", session: {}", s)).unwrap_or_default());
+            println!("{}", "─".repeat(60));
+            for (rec, entry) in entries.iter().take(take_n) {
+                let ts = format_ts(rec.timestamp);
+                match entry {
+                    TimelineEntry::User { prompt, .. } => {
+                        println!("[{}] \x1b[34m[User]\x1b[0m\n  {}\n", ts, truncate(prompt, 300));
+                    }
+                    TimelineEntry::Claude { text, session_id } => {
+                        let sid = session_id.as_deref().map(|s| format!(" ({})", &s[..8.min(s.len())])).unwrap_or_default();
+                        println!("[{}] \x1b[32m[Claude]\x1b[0m{}\n  {}\n", ts, sid, truncate(text, 300));
+                    }
+                    TimelineEntry::Note { text } => {
+                        println!("[{}] [Note]\n  {}\n", ts, truncate(text, 200));
+                    }
+                }
+            }
+        }
+
         // ── delete ─────────────────────────────────────────────────────────
         Commands::Delete { id } => {
             let mut records = read_db(&db_file)?;
@@ -1549,6 +1706,7 @@ async fn main() -> Result<()> {
                 .route("/dedup", get(handle_dedup))
                 .route("/ask", post(handle_ask))
                 .route("/summarize", get(handle_summarize))
+                .route("/timeline", get(handle_timeline))
                 .route("/export", get(handle_export))
                 .route("/import", post(handle_import))
                 .route("/", get(handle_ui))
@@ -1574,6 +1732,28 @@ async fn main() -> Result<()> {
             println!("  GET    /summarize            summarize records (?topic=xxx&tag=xxx&before=unix&after=unix&top=20)");
             axum::serve(listener, app).await?;
         }
+        // ── mcp ────────────────────────────────────────────────────────────
+        Commands::Mcp => {
+            // All logs go to stderr to keep stdout clean for JSON-RPC frames
+            tracing_subscriber::fmt()
+                .with_env_filter(
+                    tracing_subscriber::EnvFilter::try_from_default_env()
+                        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn")),
+                )
+                .with_writer(std::io::stderr)
+                .with_ansi(false)
+                .init();
+            let handler = mcp::IntentDbMcpHandler::new(
+                db_file,
+                api_key,
+                cli.embedding_url,
+                cli.embedding_model,
+                cli.llm_url,
+                cli.llm_model,
+            );
+            handler.serve_stdio().await?;
+        }
+
         // ── sync ───────────────────────────────────────────────────────────
         Commands::Sync { action } => match action {
             SyncAction::Pull { from } => {
