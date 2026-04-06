@@ -417,13 +417,13 @@ fn truncate(s: &str, max_chars: usize) -> String {
     }
 }
 
-pub enum TimelineEntry {
+pub(crate) enum TimelineEntry {
     User { prompt: String, session_id: Option<String> },
     Claude { text: String, session_id: Option<String> },
     Note { text: String },
 }
 
-pub fn classify_record(rec: &IntentRecord) -> TimelineEntry {
+pub(crate) fn classify_record(rec: &IntentRecord) -> TimelineEntry {
     if rec.tags.iter().any(|t| t == "response") {
         // New format: JSON with hook_event_name == "Stop"
         if let Ok(v) = serde_json::from_str::<serde_json::Value>(&rec.text) {
