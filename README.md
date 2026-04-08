@@ -193,9 +193,10 @@ No separate install needed — the UI is embedded in the binary.
 - **Search** — semantic search with all filters (tag, date range, α, min-score)
 - **Ask** — RAG question answering with cited sources
 - **Add** — add records with tags (Cmd+Enter to save)
-- **Browse** — list all records, filter by tag, delete individual records
+- **Browse** — list all records; tag cloud at the top lets you filter by clicking a tag; delete individual records
 - **Summarize** — LLM summary with topic / tag / date filters
 - **Timeline** — conversation history view: User prompts and Claude responses interleaved chronologically
+- **Import** — paste or upload JSON / CSV / TXT directly from the browser
 
 ---
 
@@ -281,6 +282,17 @@ curl "http://localhost:3000/dedup?threshold=0.95"
 
 # Timeline — User prompts and Claude responses interleaved chronologically
 curl "http://localhost:3000/timeline"
+
+# Tags — list all tags with record counts, sorted by count descending
+curl "http://localhost:3000/tags"
+
+# Ingest — bulk import via HTTP (JSON array, CSV, or plain text)
+curl -X POST "http://localhost:3000/ingest?format=json" \
+  -H "Content-Type: text/plain" \
+  -d '[{"text": "Alice closed a deal", "tags": ["sales"]}]'
+
+curl -X POST "http://localhost:3000/ingest?format=txt&tag=log" \
+  --data-binary @notes.txt
 ```
 
 ### Python client
@@ -610,6 +622,9 @@ Estimated on Apple M2, 1536-dim vectors (OpenAI `text-embedding-3-small`), M=16,
 - [x] Multi-device sync (`idb sync push/pull`)
 - [x] `timeline` command — conversation history view (User + Claude interleaved chronologically)
 - [x] MCP server (`idb mcp`) — native Claude Code integration via Model Context Protocol
+- [x] `GET /tags` endpoint — tag list with record counts
+- [x] Browse tag cloud — click a tag to filter instantly
+- [x] Import tab in Web UI — paste or upload JSON / CSV / TXT from the browser
 
 ---
 
@@ -823,11 +838,12 @@ UIはバイナリに埋め込まれているため、別途インストールは
 
 **タブ一覧：**
 - **Search** — タグ・日付・α・min-scoreなどすべてのフィルターに対応した意味的検索
-- **Ask** — 根拠となるソース付きのRAQ回答
+- **Ask** — 根拠となるソース付きのRAG回答
 - **Add** — タグ付きでレコードを追加（Cmd+Enterで保存）
-- **Browse** — 全レコードの一覧、タグフィルター、個別削除
+- **Browse** — 全レコードの一覧; 上部のタグクラウドからタグをクリックして即時フィルタ; 個別削除
 - **Summarize** — トピック・タグ・日付フィルター付きのLLMサマリー
 - **Timeline** — ユーザープロンプトとClaudeの回答を時系列で交互表示する会話履歴ビュー
+- **Import** — JSON / CSV / TXT をブラウザから直接ペーストまたはファイルアップロードして一括登録
 
 ---
 
@@ -913,6 +929,17 @@ curl "http://localhost:3000/dedup?threshold=0.95"
 
 # タイムライン — ユーザープロンプトとClaudeの回答を時系列で交互表示
 curl "http://localhost:3000/timeline"
+
+# タグ一覧 — レコード数付き、件数降順
+curl "http://localhost:3000/tags"
+
+# Ingest — HTTP経由の一括インポート（JSON配列・CSV・テキスト）
+curl -X POST "http://localhost:3000/ingest?format=json" \
+  -H "Content-Type: text/plain" \
+  -d '[{"text": "アリスが契約を締結", "tags": ["sales"]}]'
+
+curl -X POST "http://localhost:3000/ingest?format=txt&tag=log" \
+  --data-binary @notes.txt
 ```
 
 ### Python クライアント
@@ -1242,6 +1269,9 @@ Apple M2、1536次元ベクトル（OpenAI `text-embedding-3-small`）、M=16、
 - [x] Web UI（`idb serve` で `http://localhost:3000/` に自動表示）
 - [x] `timeline` コマンド — ユーザープロンプトとClaudeの回答を時系列表示
 - [x] MCPサーバー（`idb mcp`） — Model Context Protocol経由のClaude Code統合
+- [x] `GET /tags` エンドポイント — レコード数付きタグ一覧
+- [x] Browse タグクラウド — クリックして即時フィルタ
+- [x] Web UI Import タブ — JSON / CSV / TXT をブラウザから直接インポート
 
 ---
 
