@@ -692,9 +692,36 @@ struct PutResponse {
     total: usize,
 }
 
+fn deserialize_string_or_vec<'de, D>(d: D) -> Result<Vec<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    struct Visitor;
+    impl<'de> serde::de::Visitor<'de> for Visitor {
+        type Value = Vec<String>;
+        fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+            f.write_str("string or sequence of strings")
+        }
+        fn visit_str<E: serde::de::Error>(self, v: &str) -> Result<Vec<String>, E> {
+            Ok(vec![v.to_string()])
+        }
+        fn visit_seq<A: serde::de::SeqAccess<'de>>(
+            self,
+            mut seq: A,
+        ) -> Result<Vec<String>, A::Error> {
+            let mut v = Vec::new();
+            while let Some(s) = seq.next_element::<String>()? {
+                v.push(s);
+            }
+            Ok(v)
+        }
+    }
+    d.deserialize_any(Visitor)
+}
+
 #[derive(Deserialize)]
 struct TagFilter {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_string_or_vec")]
     tag: Vec<String>,
 }
 
@@ -722,7 +749,7 @@ struct SearchQuery {
     q: String,
     #[serde(default = "default_top")]
     top: usize,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_string_or_vec")]
     tag: Vec<String>,
     before: Option<u64>,
     after: Option<u64>,
