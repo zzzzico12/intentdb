@@ -933,8 +933,7 @@ async fn handle_timeline(
                 if let Some(ref s) = params.session {
                     match &session_id {
                         Some(sid) if sid.starts_with(s.as_str()) => {}
-                        None => {} // legacy: keep
-                        _ => return None,
+                        _ => return None, // session_id:None も session 指定時は除外
                     }
                 }
                 Some(serde_json::json!({

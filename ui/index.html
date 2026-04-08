@@ -598,21 +598,30 @@ async function doTimeline() {
     const rows = await apiFetch('/timeline?' + p);
     const el = document.getElementById('tl-out');
     if (!rows.length) { el.innerHTML = '<div class="empty">No timeline entries found.</div>'; return; }
-    el.innerHTML = rows.map(r => {
+    // セッション区切りヘッダーを挿入（全セッション表示時のみ）
+    let lastSid = undefined;
+    const parts = [];
+    for (const r of rows) {
+      const sid = r.session_id || null;
+      if (!session && sid !== lastSid) {
+        lastSid = sid;
+        const label = sid ? sid.slice(0,12) : '(no session)';
+        parts.push(`<div style="margin:16px 0 8px;padding:4px 0;border-bottom:1px solid var(--border);color:var(--muted);font-size:11px;font-family:monospace;">─ session: ${esc(label)}</div>`);
+      }
       const isUser = r.role === 'user';
-      const label  = isUser ? 'User' : 'Claude';
+      const roleLabel  = isUser ? 'User' : 'Claude';
       const color  = isUser ? 'var(--accent)' : '#4caf8a';
-      return `<div class="card" style="border-left:3px solid ${color};margin-bottom:8px;">
+      parts.push(`<div class="card" style="border-left:3px solid ${color};margin-bottom:8px;">
         <div style="display:flex;gap:8px;align-items:baseline;margin-bottom:6px;">
-          <span style="color:${color};font-weight:600;font-size:12px;">[${label}]</span>
+          <span style="color:${color};font-weight:600;font-size:12px;">[${roleLabel}]</span>
           <span style="color:var(--muted);font-size:11px;">${datetime(r.timestamp)}</span>
-          ${r.session_id ? `<span style="color:var(--muted);font-size:10px;font-family:monospace">${r.session_id.slice(0,8)}</span>` : ''}
           <button class="ghost" style="margin-left:auto;font-size:11px;padding:2px 8px;"
             onclick="navigator.clipboard.writeText(${JSON.stringify(r.text)}).then(()=>toast('Copied'))">Copy</button>
         </div>
         <div style="font-size:13px;line-height:1.6;white-space:pre-wrap;">${nl(r.text)}</div>
-      </div>`;
-    }).join('');
+      </div>`);
+    }
+    el.innerHTML = parts.join('');
   } catch (e) { err('tl-out', e.message); }
 }
 
