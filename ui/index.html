@@ -268,10 +268,26 @@
 
   <!-- ─── TIMELINE ─── -->
   <div class="panel" id="p-timeline">
-    <div class="row" style="margin-bottom:12px;">
-      <button class="ghost" style="margin-left:auto;" onclick="doTimeline()">Refresh</button>
+    <div class="filters">
+      <div class="fg">
+        <label>session</label>
+        <select id="tl-session" style="min-width:160px;font-size:12px;padding:4px 8px;" onchange="doTimeline()">
+          <option value="">All sessions</option>
+        </select>
+      </div>
+      <div class="fg" style="gap:10px;">
+        <label>role</label>
+        <label style="font-size:12px;cursor:pointer;"><input type="radio" name="tl-role" value="all" checked onchange="doTimeline()"> All</label>
+        <label style="font-size:12px;cursor:pointer;"><input type="radio" name="tl-role" value="user" onchange="doTimeline()"> User</label>
+        <label style="font-size:12px;cursor:pointer;"><input type="radio" name="tl-role" value="claude" onchange="doTimeline()"> Claude</label>
+      </div>
+      <div class="fg">
+        <label>limit</label>
+        <input id="tl-limit" class="narrow" type="number" value="50" min="1" max="500" oninput="doTimeline()">
+      </div>
+      <button class="ghost" style="margin-left:auto;" onclick="loadTimelineSessions();doTimeline()">Refresh</button>
     </div>
-    <div id="tl-out"></div>
+    <div id="tl-out" style="margin-top:14px;"></div>
   </div>
 
   <!-- ─── SUMMARIZE ─── -->
@@ -302,7 +318,7 @@ function tab(name) {
   document.querySelectorAll('.panel').forEach(el =>
     el.classList.toggle('active', el.id === 'p-' + name));
   if (name === 'browse') doBrowse();
-  if (name === 'timeline') doTimeline();
+  if (name === 'timeline') { loadTimelineSessions(); doTimeline(); }
 }
 
 // ── Keyboard shortcut (Enter) ─────────────────────────────────────────────────
@@ -326,6 +342,11 @@ function nl(s) { return esc(s).replace(/\n/g,'<br>'); }
 function date(ts) {
   return new Date(ts * 1000).toLocaleDateString('en-US',
     { year:'numeric', month:'short', day:'numeric' });
+}
+function datetime(ts) {
+  const d = new Date(ts * 1000);
+  const pad = n => String(n).padStart(2,'0');
+  return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
 }
 function scoreClass(s) {
   return s >= 0.8 ? 'score-high' : s >= 0.6 ? 'score-mid' : 'score-low';
@@ -554,24 +575,42 @@ async function doSummarize() {
 }
 
 // ── Timeline ──────────────────────────────────────────────────────────────────
+async function loadTimelineSessions() {
+  const sel = document.getElementById('tl-session');
+  try {
+    const sessions = await apiFetch('/timeline/sessions');
+    sel.innerHTML = '<option value="">All sessions</option>' +
+      sessions.map(s =>
+        `<option value="${esc(s.session_id)}">${esc(s.session_id.slice(0,12))} (${s.count} prompts)</option>`
+      ).join('');
+  } catch {}
+}
+
 async function doTimeline() {
+  const session = document.getElementById('tl-session').value;
+  const role    = document.querySelector('input[name="tl-role"]:checked')?.value ?? 'all';
+  const limit   = parseInt(document.getElementById('tl-limit').value) || 50;
   loading('tl-out');
   try {
-    const rows = await apiFetch('/timeline');
+    const p = new URLSearchParams({ limit });
+    if (session) p.append('session', session);
+    if (role !== 'all') p.append('role', role);
+    const rows = await apiFetch('/timeline?' + p);
     const el = document.getElementById('tl-out');
     if (!rows.length) { el.innerHTML = '<div class="empty">No timeline entries found.</div>'; return; }
     el.innerHTML = rows.map(r => {
       const isUser = r.role === 'user';
-      const label = isUser ? 'User' : 'Claude';
-      const color = isUser ? 'var(--accent)' : '#4caf8a';
-      const text = nl(r.text);
+      const label  = isUser ? 'User' : 'Claude';
+      const color  = isUser ? 'var(--accent)' : '#4caf8a';
       return `<div class="card" style="border-left:3px solid ${color};margin-bottom:8px;">
         <div style="display:flex;gap:8px;align-items:baseline;margin-bottom:6px;">
           <span style="color:${color};font-weight:600;font-size:12px;">[${label}]</span>
-          <span style="color:var(--muted);font-size:11px;">${date(r.timestamp)}</span>
+          <span style="color:var(--muted);font-size:11px;">${datetime(r.timestamp)}</span>
           ${r.session_id ? `<span style="color:var(--muted);font-size:10px;font-family:monospace">${r.session_id.slice(0,8)}</span>` : ''}
+          <button class="ghost" style="margin-left:auto;font-size:11px;padding:2px 8px;"
+            onclick="navigator.clipboard.writeText(${JSON.stringify(r.text)}).then(()=>toast('Copied'))">Copy</button>
         </div>
-        <div style="font-size:13px;line-height:1.6;white-space:pre-wrap;">${text}</div>
+        <div style="font-size:13px;line-height:1.6;white-space:pre-wrap;">${nl(r.text)}</div>
       </div>`;
     }).join('');
   } catch (e) { err('tl-out', e.message); }

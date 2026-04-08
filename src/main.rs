@@ -766,6 +766,23 @@ struct DedupQuery {
 fn default_top() -> usize { 5 }
 fn default_threshold() -> f32 { 0.95 }
 fn default_alpha() -> f32 { 1.0 }
+fn default_timeline_limit() -> usize { 50 }
+
+#[derive(Deserialize)]
+struct TimelineQuery {
+    session: Option<String>,
+    #[serde(default = "default_timeline_limit")]
+    limit: usize,
+    role: Option<String>, // "user" | "claude"
+}
+
+#[derive(Serialize)]
+struct SessionInfo {
+    session_id: String,
+    count: usize,
+    first_ts: u64,
+    last_ts: u64,
+}
 
 #[derive(Serialize)]
 struct DedupPair {
@@ -889,30 +906,69 @@ async fn handle_list(
 
 async fn handle_timeline(
     State(state): State<Arc<AppState>>,
+    Query(params): Query<TimelineQuery>,
 ) -> Result<Json<Vec<serde_json::Value>>, AppError> {
     let db = state.db.lock().await;
     let mut sorted: Vec<&IntentRecord> = db.records.iter().collect();
     sorted.sort_by_key(|r| r.timestamp);
     let result = sorted.into_iter().filter_map(|rec| {
         match classify_record(rec) {
-            TimelineEntry::User { prompt, session_id } => Some(serde_json::json!({
-                "role": "user",
-                "timestamp": rec.timestamp,
-                "session_id": session_id,
-                "text": prompt,
-                "id": rec.id,
-            })),
-            TimelineEntry::Claude { text, session_id } => Some(serde_json::json!({
-                "role": "claude",
-                "timestamp": rec.timestamp,
-                "session_id": session_id,
-                "text": text,
-                "id": rec.id,
-            })),
+            TimelineEntry::User { prompt, session_id } => {
+                if params.role.as_deref() == Some("claude") { return None; }
+                if let Some(ref s) = params.session {
+                    if !session_id.as_deref().unwrap_or("").starts_with(s.as_str()) {
+                        return None;
+                    }
+                }
+                Some(serde_json::json!({
+                    "role": "user",
+                    "timestamp": rec.timestamp,
+                    "session_id": session_id,
+                    "text": prompt,
+                    "id": rec.id,
+                }))
+            }
+            TimelineEntry::Claude { text, session_id } => {
+                if params.role.as_deref() == Some("user") { return None; }
+                if let Some(ref s) = params.session {
+                    match &session_id {
+                        Some(sid) if sid.starts_with(s.as_str()) => {}
+                        None => {} // legacy: keep
+                        _ => return None,
+                    }
+                }
+                Some(serde_json::json!({
+                    "role": "claude",
+                    "timestamp": rec.timestamp,
+                    "session_id": session_id,
+                    "text": text,
+                    "id": rec.id,
+                }))
+            }
             TimelineEntry::Note { .. } => None,
         }
-    }).collect();
+    }).take(params.limit).collect();
     Ok(Json(result))
+}
+
+async fn handle_timeline_sessions(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<Vec<SessionInfo>>, AppError> {
+    let db = state.db.lock().await;
+    let mut map: std::collections::HashMap<String, (usize, u64, u64)> = std::collections::HashMap::new();
+    for rec in db.records.iter() {
+        if let TimelineEntry::User { session_id: Some(sid), .. } = classify_record(rec) {
+            let entry = map.entry(sid).or_insert((0, rec.timestamp, rec.timestamp));
+            entry.0 += 1;
+            if rec.timestamp < entry.1 { entry.1 = rec.timestamp; }
+            if rec.timestamp > entry.2 { entry.2 = rec.timestamp; }
+        }
+    }
+    let mut sessions: Vec<SessionInfo> = map.into_iter().map(|(session_id, (count, first_ts, last_ts))| {
+        SessionInfo { session_id, count, first_ts, last_ts }
+    }).collect();
+    sessions.sort_by(|a, b| b.last_ts.cmp(&a.last_ts));
+    Ok(Json(sessions))
 }
 
 async fn handle_search(
@@ -1707,6 +1763,7 @@ async fn main() -> Result<()> {
                 .route("/ask", post(handle_ask))
                 .route("/summarize", get(handle_summarize))
                 .route("/timeline", get(handle_timeline))
+                .route("/timeline/sessions", get(handle_timeline_sessions))
                 .route("/export", get(handle_export))
                 .route("/import", post(handle_import))
                 .route("/", get(handle_ui))
