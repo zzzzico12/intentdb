@@ -892,6 +892,80 @@ async fn handle_put(
     Ok(Json(PutResponse { id, text: body.text, tags: body.tags, total }))
 }
 
+async fn handle_tags(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<Vec<serde_json::Value>>, AppError> {
+    let db = state.db.lock().await;
+    let mut map: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    for rec in db.records.iter() {
+        for tag in &rec.tags {
+            *map.entry(tag.clone()).or_insert(0) += 1;
+        }
+    }
+    let mut tags: Vec<serde_json::Value> = map.into_iter()
+        .map(|(tag, count)| serde_json::json!({"tag": tag, "count": count}))
+        .collect();
+    tags.sort_by(|a, b| b["count"].as_u64().cmp(&a["count"].as_u64()));
+    Ok(Json(tags))
+}
+
+#[derive(Deserialize)]
+struct IngestQuery {
+    format: Option<String>,
+    tag: Option<String>,
+}
+
+async fn handle_ingest(
+    State(state): State<Arc<AppState>>,
+    Query(params): Query<IngestQuery>,
+    body: String,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let fmt = params.format.unwrap_or_else(|| "txt".to_string()).to_lowercase();
+    let extra_tag = params.tag;
+
+    let mut entries: Vec<ImportEntry> = match fmt.as_str() {
+        "json" => serde_json::from_str(&body).map_err(|e| (axum::http::StatusCode::BAD_REQUEST, e.to_string()))?,
+        "csv" => {
+            let mut rdr = csv::Reader::from_reader(body.as_bytes());
+            let mut out = Vec::new();
+            for r in rdr.records() {
+                let r = r.map_err(|e| (axum::http::StatusCode::BAD_REQUEST, e.to_string()))?;
+                let text = r.get(0).unwrap_or("").trim().to_string();
+                if text.is_empty() { continue; }
+                let tags: Vec<String> = r.get(1).unwrap_or("").split(',')
+                    .map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
+                out.push(ImportEntry { text, tags });
+            }
+            out
+        }
+        _ => body.lines().map(|l| l.trim().to_string()).filter(|l| !l.is_empty())
+            .map(|text| ImportEntry { text, tags: vec![] }).collect(),
+    };
+
+    if let Some(ref t) = extra_tag {
+        for e in entries.iter_mut() {
+            if !e.tags.contains(t) { e.tags.push(t.clone()); }
+        }
+    }
+
+    let mut imported = 0usize;
+    for entry in entries {
+        let vector = get_embedding(&entry.text, &state.api_key, &state.embedding_url, &state.embedding_model)
+            .await.map_err(internal)?;
+        let id = uuid::Uuid::new_v4().to_string();
+        let mut db = state.db.lock().await;
+        db.index.insert(id.clone(), vector.clone());
+        db.records.push(IntentRecord {
+            id, text: entry.text, vector, timestamp: now_secs(), tags: entry.tags,
+        });
+        write_db(&state.db_path, &db.records).map_err(internal)?;
+        imported += 1;
+    }
+
+    let total = state.db.lock().await.records.len();
+    Ok(Json(serde_json::json!({ "imported": imported, "total": total })))
+}
+
 async fn handle_list(
     State(state): State<Arc<AppState>>,
     Query(filter): Query<TagFilter>,
@@ -1761,6 +1835,8 @@ async fn main() -> Result<()> {
                 .route("/dedup", get(handle_dedup))
                 .route("/ask", post(handle_ask))
                 .route("/summarize", get(handle_summarize))
+                .route("/tags", get(handle_tags))
+                .route("/ingest", post(handle_ingest))
                 .route("/timeline", get(handle_timeline))
                 .route("/timeline/sessions", get(handle_timeline_sessions))
                 .route("/export", get(handle_export))

@@ -214,6 +214,7 @@
     <button class="tab" onclick="tab('browse')">Browse</button>
     <button class="tab" onclick="tab('summarize')">Summarize</button>
     <button class="tab" onclick="tab('timeline')">Timeline</button>
+    <button class="tab" onclick="tab('import')">Import</button>
   </div>
 
   <!-- ─── SEARCH ─── -->
@@ -258,10 +259,11 @@
 
   <!-- ─── BROWSE ─── -->
   <div class="panel" id="p-browse">
+    <div id="b-tags" style="margin-bottom:10px;min-height:20px;"></div>
     <div class="row" style="margin-bottom:12px;">
       <input type="text" id="b-tag" placeholder="Filter by tag..." style="width:200px" oninput="doBrowse()">
       <span id="b-count" style="color:var(--muted);font-size:12px;line-height:36px;"></span>
-      <button class="ghost" style="margin-left:auto;" onclick="doBrowse()">Refresh</button>
+      <button class="ghost" style="margin-left:auto;" onclick="loadBrowseTags();doBrowse()">Refresh</button>
     </div>
     <div id="b-out" class="results"></div>
   </div>
@@ -304,12 +306,36 @@
     </div>
     <div id="u-out" style="margin-top:16px;"></div>
   </div>
+
+  <!-- ─── IMPORT ─── -->
+  <div class="panel" id="p-import">
+    <div class="sec">Import records</div>
+    <div style="margin-bottom:12px;color:var(--muted);font-size:13px;">
+      JSON array <code>[{"text":"...","tags":[]}]</code>, CSV (text,tags), or one line per record (TXT)
+    </div>
+    <div class="row" style="margin-bottom:10px;">
+      <input type="file" id="im-file" accept=".json,.csv,.txt" onchange="onImportFile(event)" style="font-size:13px;color:var(--text);">
+      <select id="im-format" style="font-size:12px;padding:4px 8px;">
+        <option value="">Auto-detect</option>
+        <option value="json">JSON</option>
+        <option value="csv">CSV</option>
+        <option value="txt">TXT</option>
+      </select>
+    </div>
+    <textarea id="im-text" placeholder="Or paste content here — JSON array, CSV rows, or plain lines..."
+      style="height:160px;width:100%;box-sizing:border-box;resize:vertical;"></textarea>
+    <div class="row" style="margin-top:10px;">
+      <input type="text" id="im-tag" placeholder="Tag to apply to all imported records (optional)">
+      <button class="primary" id="im-btn" onclick="doImport()">Import</button>
+    </div>
+    <div id="im-out" style="margin-top:12px;"></div>
+  </div>
 </div>
 
 <div class="toast" id="toast"></div>
 
 <script>
-const TABS = ['search','ask','add','browse','summarize','timeline'];
+const TABS = ['search','ask','add','browse','summarize','timeline','import'];
 
 // ── Tab switching ─────────────────────────────────────────────────────────────
 function tab(name) {
@@ -317,7 +343,7 @@ function tab(name) {
     el.classList.toggle('active', TABS[i] === name));
   document.querySelectorAll('.panel').forEach(el =>
     el.classList.toggle('active', el.id === 'p-' + name));
-  if (name === 'browse') doBrowse();
+  if (name === 'browse') { loadBrowseTags(); doBrowse(); }
   if (name === 'timeline') { loadTimelineSessions(); doTimeline(); }
 }
 
@@ -572,6 +598,57 @@ async function doSummarize() {
         <div class="summary-meta">${res.record_count} records used as context</div>
       </div>`;
   } catch (e) { err('u-out', e.message); }
+}
+
+// ── Browse tag cloud ──────────────────────────────────────────────────────────
+async function loadBrowseTags() {
+  try {
+    const tags = await apiFetch('/tags');
+    const el = document.getElementById('b-tags');
+    if (!tags.length) { el.innerHTML = ''; return; }
+    el.innerHTML = tags.map(t =>
+      `<span class="tag" style="cursor:pointer;margin:2px;" onclick="filterByTag('${esc(t.tag)}')">${esc(t.tag)} <span style="opacity:.6">${t.count}</span></span>`
+    ).join('');
+  } catch {}
+}
+function filterByTag(tag) {
+  document.getElementById('b-tag').value = tag;
+  doBrowse();
+}
+
+// ── Import ────────────────────────────────────────────────────────────────────
+async function onImportFile(e) {
+  const file = e.target.files[0];
+  if (!file) return;
+  document.getElementById('im-text').value = await file.text();
+  const ext = file.name.split('.').pop().toLowerCase();
+  const sel = document.getElementById('im-format');
+  if (['json','csv','txt'].includes(ext)) sel.value = ext;
+}
+
+async function doImport() {
+  const text   = document.getElementById('im-text').value.trim();
+  const format = document.getElementById('im-format').value;
+  const tag    = document.getElementById('im-tag').value.trim();
+  const btn    = document.getElementById('im-btn');
+  if (!text) { toast('Nothing to import', 'err'); return; }
+  btn.disabled = true; btn.textContent = 'Importing…';
+  try {
+    const p = new URLSearchParams();
+    if (format) p.append('format', format);
+    if (tag)    p.append('tag', tag);
+    const res = await apiFetch('/ingest?' + p, {
+      method: 'POST',
+      headers: { 'Content-Type': 'text/plain' },
+      body: text,
+    });
+    document.getElementById('im-out').innerHTML =
+      `<div class="summary" style="color:#4caf8a;">Imported ${res.imported} records (total: ${res.total})</div>`;
+    document.getElementById('im-text').value = '';
+    document.getElementById('im-file').value = '';
+    loadStats();
+  } catch (e) { err('im-out', e.message); }
+  finally { btn.disabled = false; btn.textContent = 'Import'; }
 }
 
 // ── Timeline ──────────────────────────────────────────────────────────────────
