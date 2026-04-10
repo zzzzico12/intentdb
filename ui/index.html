@@ -3,28 +3,29 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>intentdb</title>
+  <title>Prompt History</title>
   <style>
     :root {
-      --bg:        #0f1117;
-      --card:      #161b27;
-      --border:    #252a38;
-      --accent:    #818cf8;
-      --accent-bg: #1e1b4b44;
-      --accent-dim:#3730a3;
-      --text:      #e2e8f0;
-      --muted:     #64748b;
-      --green:     #4ade80;
-      --yellow:    #fbbf24;
-      --red:       #f87171;
+      --bg:        #2b2928;
+      --card:      #343130;
+      --border:    #4a4644;
+      --accent:    #d4774f;
+      --accent-bg: #d4774f18;
+      --accent-dim:#8a4a2f;
+      --text:      #f0ebe3;
+      --muted:     #9a9088;
+      --green:     #6ab87a;
+      --yellow:    #d4a853;
+      --red:       #e07070;
+      --user-bg:   #3d3a38;
     }
     * { box-sizing: border-box; margin: 0; padding: 0; }
     body {
       background: var(--bg); color: var(--text);
-      font-family: system-ui, -apple-system, sans-serif;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
       font-size: 14px; line-height: 1.6;
     }
-    .wrap { max-width: 900px; margin: 0 auto; padding: 0 20px; }
+    .wrap { max-width: 820px; margin: 0 auto; padding: 0 24px; }
 
     /* ── Header ── */
     header {
@@ -32,7 +33,7 @@
       padding: 14px 0;
       display: flex; align-items: center; gap: 12px;
     }
-    header h1 { font-size: 18px; font-weight: 700; letter-spacing: -0.5px; }
+    header h1 { font-size: 16px; font-weight: 600; letter-spacing: -0.3px; color: var(--text); }
     header .tagline { color: var(--muted); font-size: 12px; }
     header .stats { margin-left: auto; color: var(--muted); font-size: 12px; }
 
@@ -108,39 +109,44 @@
 
     .card {
       background: var(--card); border: 1px solid var(--border);
-      border-radius: 8px; padding: 13px 15px;
+      border-radius: 10px; padding: 14px 16px;
       transition: border-color 0.15s;
     }
-    .card:hover { border-color: var(--accent-dim); }
+    .card:hover { border-color: #5a5248; }
 
     .card-top { display: flex; align-items: flex-start; gap: 10px; }
-    .card-body { flex: 1; line-height: 1.55; word-break: break-word; }
+    .card-body { flex: 1; line-height: 1.6; word-break: break-word; }
 
     .badge {
       font-size: 11px; font-weight: 600; padding: 2px 7px;
       border-radius: 4px; white-space: nowrap; flex-shrink: 0; margin-top: 2px;
     }
-    .score-high { background: #14532d33; color: var(--green);  border: 1px solid #14532d; }
-    .score-mid  { background: #78350f33; color: var(--yellow); border: 1px solid #78350f; }
-    .score-low  { background: #7f1d1d33; color: var(--red);    border: 1px solid #7f1d1d; }
+    .score-high { background: #1a3a2633; color: var(--green);  border: 1px solid #2a5a3a; }
+    .score-mid  { background: #3a2a1033; color: var(--yellow); border: 1px solid #6a5020; }
+    .score-low  { background: #3a1a1a33; color: var(--red);    border: 1px solid #6a3030; }
 
     .card-meta {
       display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
       margin-top: 8px;
     }
-    .mono { font-family: monospace; font-size: 11px; color: var(--muted); }
-    .date { font-size: 11px; color: var(--muted); }
+    .mono { font-family: ui-monospace, monospace; font-size: 11px; color: var(--muted); }
 
-    .tag {
-      font-size: 11px; padding: 1px 8px; border-radius: 3px;
-      background: #1e1b4b; color: var(--accent); border: 1px solid var(--accent-dim);
+    /* ── Session message bubbles ── */
+    .msg-user {
+      background: var(--user-bg); border: 1px solid var(--border);
+      border-radius: 10px; padding: 12px 15px; margin-bottom: 4px;
     }
-    .card-actions { margin-left: auto; flex-shrink: 0; }
+    .msg-claude {
+      padding: 12px 4px; margin-bottom: 4px;
+    }
+    .msg-divider {
+      border: none; border-top: 1px solid var(--border); margin: 4px 0 12px;
+    }
 
     /* ── Answer card ── */
     .answer {
-      background: #0f2a1a; border: 1px solid #14532d;
-      border-radius: 8px; padding: 16px; line-height: 1.75; margin-bottom: 14px;
+      background: #1e2820; border: 1px solid #2a4a35;
+      border-radius: 10px; padding: 16px; line-height: 1.75; margin-bottom: 14px;
     }
     .answer-label {
       font-size: 11px; color: var(--green); font-weight: 600;
@@ -150,7 +156,7 @@
     /* ── Summary card ── */
     .summary {
       background: var(--card); border: 1px solid var(--border);
-      border-radius: 8px; padding: 16px; line-height: 1.75;
+      border-radius: 10px; padding: 16px; line-height: 1.75;
     }
     .summary-meta { font-size: 11px; color: var(--muted); margin-top: 10px; }
 
@@ -161,10 +167,9 @@
     }
 
     /* ── Status/feedback ── */
-    .empty  { color: var(--muted); text-align: center; padding: 36px 0; font-size: 13px; }
-    .err    { color: var(--red); background: #7f1d1d22; border: 1px solid #7f1d1d55;
-              border-radius: 6px; padding: 10px 14px; font-size: 13px; margin-top: 10px; }
-    .ok-msg { color: var(--green); font-size: 13px; margin-top: 10px; }
+    .empty  { color: var(--muted); text-align: center; padding: 40px 0; font-size: 13px; }
+    .err    { color: var(--red); background: #3a1a1a33; border: 1px solid #6a303055;
+              border-radius: 8px; padding: 10px 14px; font-size: 13px; margin-top: 10px; }
 
     /* ── Spinner ── */
     @keyframes spin { to { transform: rotate(360deg); } }
@@ -174,22 +179,22 @@
       border-radius: 50%; animation: spin 0.6s linear infinite;
       vertical-align: middle; margin-right: 6px;
     }
-    .loading { color: var(--muted); text-align: center; padding: 36px 0; }
+    .loading { color: var(--muted); text-align: center; padding: 40px 0; }
 
     /* ── Toast ── */
     .toast {
       position: fixed; bottom: 20px; right: 20px;
       background: var(--card); border: 1px solid var(--border);
-      padding: 10px 16px; border-radius: 8px; font-size: 13px;
+      padding: 10px 16px; border-radius: 10px; font-size: 13px;
       opacity: 0; transition: opacity 0.2s; pointer-events: none; z-index: 100;
     }
     .toast.show { opacity: 1; }
-    .toast.ok  { border-color: #14532d; color: var(--green); }
-    .toast.err { border-color: #7f1d1d; color: var(--red); }
+    .toast.ok  { border-color: #2a5a3a; color: var(--green); }
+    .toast.err { border-color: #6a3030; color: var(--red); }
 
     /* ── Offline banner ── */
     .offline-bar {
-      display: none; background: #7f1d1d22; border-bottom: 1px solid #7f1d1d55;
+      display: none; background: #3a1a1a33; border-bottom: 1px solid #6a303055;
       color: var(--red); font-size: 12px; text-align: center; padding: 7px;
     }
     .offline-bar.show { display: block; }
@@ -202,34 +207,43 @@
 </div>
 <div class="wrap">
   <header>
-    <h1>intentdb</h1>
-    <span class="tagline">schema-free · intent-native</span>
+    <h1>Prompt History</h1>
+    <span class="tagline">conversation log · semantic search</span>
     <span class="stats" id="stats">—</span>
   </header>
 
   <div class="tabs">
-    <button class="tab active" onclick="tab('search')">Search</button>
+    <button class="tab active" onclick="tab('timeline')">Timeline</button>
+    <button class="tab" onclick="tab('search')">Search</button>
     <button class="tab" onclick="tab('ask')">Ask</button>
-    <button class="tab" onclick="tab('add')">Add</button>
-    <button class="tab" onclick="tab('browse')">Browse</button>
-    <button class="tab" onclick="tab('summarize')">Summarize</button>
-    <button class="tab" onclick="tab('timeline')">Timeline</button>
-    <button class="tab" onclick="tab('import')">Import</button>
+  </div>
+
+  <!-- ─── TIMELINE ─── -->
+  <div class="panel active" id="p-timeline">
+    <div style="display:flex;justify-content:flex-end;margin-bottom:8px;">
+      <button class="ghost" onclick="sessionCache.clear();loadTimeline()">Refresh</button>
+    </div>
+    <div id="tl-sessions" style="display:flex;flex-direction:column;gap:8px;"></div>
   </div>
 
   <!-- ─── SEARCH ─── -->
-  <div class="panel active" id="p-search">
+  <div class="panel" id="p-search">
     <div class="row">
-      <input type="text" id="s-q" placeholder="Search in plain language — e.g. 'customers with billing issues'" onkeydown="k(event,'doSearch')">
+      <input type="text" id="s-q" placeholder="Search prompts and responses…" onkeydown="k(event,'doSearch')">
       <button class="primary" onclick="doSearch()">Search</button>
     </div>
     <div class="filters">
-      <div class="fg"><label>tag</label><input id="s-tag" class="wide" placeholder="urgent"></div>
+      <div class="fg" style="gap:10px;">
+        <label>role</label>
+        <label style="font-size:12px;cursor:pointer;"><input type="radio" name="s-role" value="all" checked> All</label>
+        <label style="font-size:12px;cursor:pointer;"><input type="radio" name="s-role" value="user"> User</label>
+        <label style="font-size:12px;cursor:pointer;"><input type="radio" name="s-role" value="claude"> Claude</label>
+      </div>
       <div class="fg"><label>after</label><input id="s-after" class="wide" placeholder="2024-01-01"></div>
       <div class="fg"><label>before</label><input id="s-before" class="wide" placeholder="2024-12-31"></div>
       <div class="fg"><label>α</label><input id="s-alpha" class="narrow" type="number" value="1" min="0" max="1" step="0.1" title="1.0=semantic, 0.0=keyword"></div>
       <div class="fg"><label>min score</label><input id="s-min" class="narrow" type="number" value="0" min="0" max="1" step="0.05"></div>
-      <div class="fg"><label>top</label><input id="s-top" class="narrow" type="number" value="10" min="1" max="100"></div>
+      <div class="fg"><label>top</label><input id="s-top" class="narrow" type="number" value="20" min="1" max="100"></div>
     </div>
     <div id="s-out" class="results"></div>
   </div>
@@ -237,7 +251,7 @@
   <!-- ─── ASK ─── -->
   <div class="panel" id="p-ask">
     <div class="row">
-      <input type="text" id="a-q" placeholder="Ask a question — e.g. 'What were the main support issues last month?'" onkeydown="k(event,'doAsk')">
+      <input type="text" id="a-q" placeholder="Ask a question about your conversation history…" onkeydown="k(event,'doAsk')">
       <button class="primary" onclick="doAsk()">Ask</button>
     </div>
     <div class="filters">
@@ -245,97 +259,12 @@
     </div>
     <div id="a-out" style="margin-top:16px;"></div>
   </div>
-
-  <!-- ─── ADD ─── -->
-  <div class="panel" id="p-add">
-    <div class="sec">New record</div>
-    <textarea id="n-text" placeholder="Type anything — customer notes, bug reports, decisions, ideas...&#10;&#10;Cmd+Enter to save"></textarea>
-    <div class="row" style="margin-top:10px;">
-      <input type="text" id="n-tags" placeholder="Tags (comma-separated): bug, urgent, customer-a">
-      <button class="primary" id="n-btn" onclick="doAdd()">Add record</button>
-    </div>
-    <div id="n-out"></div>
-  </div>
-
-  <!-- ─── BROWSE ─── -->
-  <div class="panel" id="p-browse">
-    <div id="b-tags" style="margin-bottom:10px;min-height:20px;"></div>
-    <div class="row" style="margin-bottom:12px;">
-      <input type="text" id="b-tag" placeholder="Filter by tag..." style="width:200px" oninput="doBrowse()">
-      <span id="b-count" style="color:var(--muted);font-size:12px;line-height:36px;"></span>
-      <button class="ghost" style="margin-left:auto;" onclick="loadBrowseTags();doBrowse()">Refresh</button>
-    </div>
-    <div id="b-out" class="results"></div>
-  </div>
-
-  <!-- ─── TIMELINE ─── -->
-  <div class="panel" id="p-timeline">
-    <div class="filters">
-      <div class="fg">
-        <label>session</label>
-        <select id="tl-session" style="min-width:160px;font-size:12px;padding:4px 8px;" onchange="doTimeline()">
-          <option value="">All sessions</option>
-        </select>
-      </div>
-      <div class="fg" style="gap:10px;">
-        <label>role</label>
-        <label style="font-size:12px;cursor:pointer;"><input type="radio" name="tl-role" value="all" checked onchange="doTimeline()"> All</label>
-        <label style="font-size:12px;cursor:pointer;"><input type="radio" name="tl-role" value="user" onchange="doTimeline()"> User</label>
-        <label style="font-size:12px;cursor:pointer;"><input type="radio" name="tl-role" value="claude" onchange="doTimeline()"> Claude</label>
-      </div>
-      <div class="fg">
-        <label>limit</label>
-        <input id="tl-limit" class="narrow" type="number" value="50" min="1" max="500" oninput="doTimeline()">
-      </div>
-      <button class="ghost" style="margin-left:auto;" onclick="loadTimelineSessions();doTimeline()">Refresh</button>
-    </div>
-    <div id="tl-out" style="margin-top:14px;"></div>
-  </div>
-
-  <!-- ─── SUMMARIZE ─── -->
-  <div class="panel" id="p-summarize">
-    <div class="row">
-      <input type="text" id="u-topic" placeholder="Focus topic (optional) — e.g. 'billing issues', 'deployment incidents'" onkeydown="k(event,'doSummarize')">
-      <button class="primary" onclick="doSummarize()">Summarize</button>
-    </div>
-    <div class="filters">
-      <div class="fg"><label>tag</label><input id="u-tag" class="wide" placeholder="support"></div>
-      <div class="fg"><label>after</label><input id="u-after" class="wide" placeholder="2024-01-01"></div>
-      <div class="fg"><label>before</label><input id="u-before" class="wide" placeholder="2024-12-31"></div>
-      <div class="fg"><label>max records</label><input id="u-top" class="narrow" type="number" value="20" min="1" max="200"></div>
-    </div>
-    <div id="u-out" style="margin-top:16px;"></div>
-  </div>
-
-  <!-- ─── IMPORT ─── -->
-  <div class="panel" id="p-import">
-    <div class="sec">Import records</div>
-    <div style="margin-bottom:12px;color:var(--muted);font-size:13px;">
-      JSON array <code>[{"text":"...","tags":[]}]</code>, CSV (text,tags), or one line per record (TXT)
-    </div>
-    <div class="row" style="margin-bottom:10px;">
-      <input type="file" id="im-file" accept=".json,.csv,.txt" onchange="onImportFile(event)" style="font-size:13px;color:var(--text);">
-      <select id="im-format" style="font-size:12px;padding:4px 8px;">
-        <option value="">Auto-detect</option>
-        <option value="json">JSON</option>
-        <option value="csv">CSV</option>
-        <option value="txt">TXT</option>
-      </select>
-    </div>
-    <textarea id="im-text" placeholder="Or paste content here — JSON array, CSV rows, or plain lines..."
-      style="height:160px;width:100%;box-sizing:border-box;resize:vertical;"></textarea>
-    <div class="row" style="margin-top:10px;">
-      <input type="text" id="im-tag" placeholder="Tag to apply to all imported records (optional)">
-      <button class="primary" id="im-btn" onclick="doImport()">Import</button>
-    </div>
-    <div id="im-out" style="margin-top:12px;"></div>
-  </div>
 </div>
 
 <div class="toast" id="toast"></div>
 
 <script>
-const TABS = ['search','ask','add','browse','summarize','timeline','import'];
+const TABS = ['timeline','search','ask'];
 
 // ── Tab switching ─────────────────────────────────────────────────────────────
 function tab(name) {
@@ -343,8 +272,7 @@ function tab(name) {
     el.classList.toggle('active', TABS[i] === name));
   document.querySelectorAll('.panel').forEach(el =>
     el.classList.toggle('active', el.id === 'p-' + name));
-  if (name === 'browse') { loadBrowseTags(); doBrowse(); }
-  if (name === 'timeline') { loadTimelineSessions(); doTimeline(); }
+  if (name === 'timeline') loadTimeline();
 }
 
 // ── Keyboard shortcut (Enter) ─────────────────────────────────────────────────
@@ -365,10 +293,6 @@ function esc(s) {
     .replace(/>/g,'&gt;').replace(/"/g,'&quot;');
 }
 function nl(s) { return esc(s).replace(/\n/g,'<br>'); }
-function date(ts) {
-  return new Date(ts * 1000).toLocaleDateString('en-US',
-    { year:'numeric', month:'short', day:'numeric' });
-}
 function datetime(ts) {
   const d = new Date(ts * 1000);
   const pad = n => String(n).padStart(2,'0');
@@ -376,9 +300,6 @@ function datetime(ts) {
 }
 function scoreClass(s) {
   return s >= 0.8 ? 'score-high' : s >= 0.6 ? 'score-mid' : 'score-low';
-}
-function chips(tags) {
-  return (tags||[]).map(t => `<span class="tag">${esc(t)}</span>`).join(' ');
 }
 function toUnix(s) {
   if (!s) return null;
@@ -393,7 +314,6 @@ function err(id, msg) {
   document.getElementById(id).innerHTML = `<div class="err">${esc(msg)}</div>`;
 }
 
-// Safe fetch: throws with server's plain-text body if not JSON
 async function apiFetch(url, opts) {
   const res = await fetch(url, opts);
   const text = await res.text();
@@ -413,14 +333,169 @@ function parseHookText(text, tags) {
       return { label: 'Claude', text: v.response || text, session: v.session_id };
     }
   } catch {}
-  // Legacy plain-text response
   if (Array.isArray(tags) && tags.includes('response')) {
     return { label: 'Claude', text, session: null };
   }
   return null;
 }
 
-// ── Record card ────────────────────────────────────────────────────────────────
+// ── Clipboard store (avoids quoting issues in onclick attrs) ──────────────────
+const _clips = [];
+function _storeClip(text) { _clips.push(text); return _clips.length - 1; }
+function _copyClip(i) {
+  event.stopPropagation();
+  navigator.clipboard.writeText(_clips[i]).then(() => toast('Copied'));
+}
+
+// ── Stats ─────────────────────────────────────────────────────────────────────
+async function loadStats() {
+  try {
+    const data = await apiFetch('/records');
+    document.getElementById('stats').textContent =
+      `${Array.isArray(data) ? data.length : 0} records`;
+    document.getElementById('offline-bar').classList.remove('show');
+  } catch {
+    document.getElementById('stats').textContent = 'offline';
+    document.getElementById('offline-bar').classList.add('show');
+  }
+}
+
+// ── Timeline ──────────────────────────────────────────────────────────────────
+const sessionCache = new Map();
+
+async function loadTimeline() {
+  const el = document.getElementById('tl-sessions');
+  el.innerHTML = '<div class="loading"><span class="spinner"></span>Loading sessions…</div>';
+  try {
+    const sessions = await apiFetch('/timeline/sessions');
+    if (!sessions.length) {
+      el.innerHTML = '<div class="empty">No conversation sessions found.</div>';
+      return;
+    }
+    el.innerHTML = sessions.map(s => {
+      const preview = s.first_prompt
+        ? (s.first_prompt.length > 80 ? s.first_prompt.slice(0,80) + '…' : s.first_prompt)
+        : '(no preview)';
+      const sid = s.session_id;
+      return `<div class="card" style="cursor:pointer;" id="sc-${esc(sid)}" onclick="toggleSession('${esc(sid)}',this)">
+        <div style="display:flex;align-items:center;gap:12px;">
+          <div style="flex:1;min-width:0;">
+            <div style="font-size:11px;color:var(--muted);margin-bottom:3px;">
+              ${datetime(s.first_ts)}&ensp;·&ensp;${s.count} prompt${s.count===1?'':'s'}&ensp;·&ensp;last: ${datetime(s.last_ts)}
+            </div>
+            <div style="font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">
+              ${esc(preview)}
+            </div>
+          </div>
+          <span class="sc-arrow" style="color:var(--muted);font-size:13px;flex-shrink:0;transition:transform 0.2s;">▶</span>
+        </div>
+        <div class="sc-body" style="display:none;margin-top:12px;border-top:1px solid var(--border);padding-top:12px;" onclick="event.stopPropagation()"></div>
+      </div>`;
+    }).join('');
+  } catch (e) {
+    el.innerHTML = `<div class="err">${esc(e.message)}</div>`;
+  }
+}
+
+async function toggleSession(sid, card) {
+  const body  = card.querySelector('.sc-body');
+  const arrow = card.querySelector('.sc-arrow');
+  const isOpen = body.style.display !== 'none';
+  if (isOpen) {
+    body.style.display = 'none';
+    arrow.style.transform = '';
+    return;
+  }
+  arrow.style.transform = 'rotate(90deg)';
+  body.style.display = 'block';
+  if (sessionCache.has(sid)) { body.innerHTML = sessionCache.get(sid); return; }
+  body.innerHTML = '<div class="loading"><span class="spinner"></span>Loading…</div>';
+  try {
+    const rows = await apiFetch(`/timeline?session=${encodeURIComponent(sid)}&limit=500`);
+    const html = renderSession(rows);
+    sessionCache.set(sid, html);
+    body.innerHTML = html;
+  } catch (e) {
+    body.innerHTML = `<div class="err">${esc(e.message)}</div>`;
+  }
+}
+
+function renderSession(rows) {
+  if (!rows.length) return '<div class="empty">No entries in this session.</div>';
+
+  const md = rows.map(r =>
+    `## ${r.role === 'user' ? 'User' : 'Claude'}\n\n${r.text}`
+  ).join('\n\n---\n\n');
+  const mdIdx = _storeClip(md);
+
+  const msgs = rows.map(r => {
+    const isUser  = r.role === 'user';
+    const clipIdx = _storeClip(r.text);
+    if (isUser) {
+      return `<div class="msg-user">
+        <div style="display:flex;align-items:baseline;gap:8px;margin-bottom:6px;">
+          <span style="color:var(--text);font-weight:600;font-size:12px;">You</span>
+          <span style="color:var(--muted);font-size:11px;">${datetime(r.timestamp)}</span>
+          <button class="ghost" style="margin-left:auto;font-size:11px;padding:2px 8px;"
+            onclick="_copyClip(${clipIdx})">Copy</button>
+        </div>
+        <div style="font-size:13px;line-height:1.7;white-space:pre-wrap;">${nl(r.text)}</div>
+      </div><div style="height:8px;"></div>`;
+    } else {
+      return `<div class="msg-claude">
+        <div style="display:flex;align-items:baseline;gap:8px;margin-bottom:6px;">
+          <span style="color:var(--accent);font-weight:600;font-size:12px;">Claude</span>
+          <span style="color:var(--muted);font-size:11px;">${datetime(r.timestamp)}</span>
+          <button class="ghost" style="margin-left:auto;font-size:11px;padding:2px 8px;"
+            onclick="_copyClip(${clipIdx})">Copy</button>
+        </div>
+        <div style="font-size:13px;line-height:1.7;white-space:pre-wrap;color:var(--text);">${nl(r.text)}</div>
+      </div><hr class="msg-divider">`;
+    }
+  }).join('');
+
+  return `<div style="display:flex;justify-content:flex-end;margin-bottom:10px;">
+    <button class="ghost" onclick="_copyClip(${mdIdx})">📋 Copy session as Markdown</button>
+  </div>${msgs}`;
+}
+
+// ── Search ────────────────────────────────────────────────────────────────────
+async function doSearch() {
+  const q = document.getElementById('s-q').value.trim();
+  if (!q) return;
+  loading('s-out');
+
+  const p = new URLSearchParams({ q });
+  const after  = toUnix(document.getElementById('s-after').value.trim());
+  const before = toUnix(document.getElementById('s-before').value.trim());
+  const alpha  = document.getElementById('s-alpha').value;
+  const min    = document.getElementById('s-min').value;
+  const top    = document.getElementById('s-top').value;
+  const role   = document.querySelector('input[name="s-role"]:checked')?.value ?? 'all';
+
+  if (after)  p.append('after', after);
+  if (before) p.append('before', before);
+  if (alpha)  p.append('alpha', alpha);
+  if (min)    p.append('min_score', min);
+  if (top)    p.append('top', top);
+
+  try {
+    let rows = await apiFetch('/search?' + p);
+    if (role !== 'all') {
+      rows = rows.filter(r => {
+        const hook = parseHookText(r.text, r.tags);
+        if (!hook) return false;
+        return (role === 'user' && hook.label === 'User') ||
+               (role === 'claude' && hook.label === 'Claude');
+      });
+    }
+    const el = document.getElementById('s-out');
+    if (!rows.length) { el.innerHTML = '<div class="empty">No results found.</div>'; return; }
+    el.innerHTML = rows.map(r => card(r, true)).join('');
+  } catch (e) { err('s-out', e.message); }
+}
+
+// ── Record card ───────────────────────────────────────────────────────────────
 function card(r, showScore) {
   const score = showScore && r.score != null
     ? `<span class="badge ${scoreClass(r.score)}">${r.score.toFixed(3)}</span>` : '';
@@ -436,59 +511,13 @@ function card(r, showScore) {
       <div class="card-top">
         ${score}
         <span class="card-body">${roleLabel}${nl(displayText)}</span>
-        <div class="card-actions">
-          <button class="danger" onclick="del('${r.id}',this)" title="Delete">✕</button>
-        </div>
       </div>
       <div class="card-meta">
         <span class="mono">${r.id.slice(0,8)}…</span>
-        <span class="date">${date(r.timestamp)}</span>
+        <span style="font-size:11px;color:var(--muted);">${datetime(r.timestamp)}</span>
         ${sessionBadge}
-        ${chips(r.tags)}
       </div>
     </div>`;
-}
-
-// ── Stats ──────────────────────────────────────────────────────────────────────
-async function loadStats() {
-  try {
-    const data = await apiFetch('/records');
-    document.getElementById('stats').textContent =
-      `${Array.isArray(data) ? data.length : 0} records`;
-    document.getElementById('offline-bar').classList.remove('show');
-  } catch {
-    document.getElementById('stats').textContent = 'offline';
-    document.getElementById('offline-bar').classList.add('show');
-  }
-}
-
-// ── Search ────────────────────────────────────────────────────────────────────
-async function doSearch() {
-  const q = document.getElementById('s-q').value.trim();
-  if (!q) return;
-  loading('s-out');
-
-  const p = new URLSearchParams({ q });
-  const tag   = document.getElementById('s-tag').value.trim();
-  const after  = toUnix(document.getElementById('s-after').value.trim());
-  const before = toUnix(document.getElementById('s-before').value.trim());
-  const alpha  = document.getElementById('s-alpha').value;
-  const min    = document.getElementById('s-min').value;
-  const top    = document.getElementById('s-top').value;
-
-  if (tag)    p.append('tag', tag);
-  if (after)  p.append('after', after);
-  if (before) p.append('before', before);
-  if (alpha)  p.append('alpha', alpha);
-  if (min)    p.append('min_score', min);
-  if (top)    p.append('top', top);
-
-  try {
-    const rows = await apiFetch('/search?' + p);
-    const el = document.getElementById('s-out');
-    if (!rows.length) { el.innerHTML = '<div class="empty">No results found.</div>'; return; }
-    el.innerHTML = rows.map(r => card(r, true)).join('');
-  } catch (e) { err('s-out', e.message); }
 }
 
 // ── Ask ───────────────────────────────────────────────────────────────────────
@@ -504,12 +533,7 @@ async function doAsk() {
       headers: {'Content-Type':'application/json'},
       body: JSON.stringify({ question: q, top }),
     });
-
-    let html = `
-      <div class="answer">
-        <div class="answer-label">ANSWER</div>
-        ${nl(res.answer)}
-      </div>`;
+    let html = `<div class="answer"><div class="answer-label">ANSWER</div>${nl(res.answer)}</div>`;
     if (res.sources && res.sources.length) {
       html += `<div class="sec">Sources (${res.sources.length})</div>`;
       html += res.sources.map(r => card(r, false)).join('');
@@ -518,195 +542,9 @@ async function doAsk() {
   } catch (e) { err('a-out', e.message); }
 }
 
-// ── Add ───────────────────────────────────────────────────────────────────────
-async function doAdd() {
-  const text = document.getElementById('n-text').value.trim();
-  if (!text) return;
-  const btn  = document.getElementById('n-btn');
-  const tagsRaw = document.getElementById('n-tags').value.trim();
-  const tags = tagsRaw ? tagsRaw.split(',').map(t => t.trim()).filter(Boolean) : [];
-
-  btn.disabled = true; btn.textContent = 'Saving…';
-  document.getElementById('n-out').innerHTML = '';
-
-  try {
-    const res = await apiFetch('/records', {
-      method: 'POST',
-      headers: {'Content-Type':'application/json'},
-      body: JSON.stringify({ text, tags }),
-    });
-
-    document.getElementById('n-text').value = '';
-    document.getElementById('n-tags').value = '';
-    toast(`Saved — id: ${res.id.slice(0,8)}…`);
-    loadStats();
-  } catch (e) { err('n-out', e.message); }
-  finally { btn.disabled = false; btn.textContent = 'Add record'; }
-}
-
-// ── Browse ────────────────────────────────────────────────────────────────────
-async function doBrowse() {
-  loading('b-out');
-  const tag = document.getElementById('b-tag').value.trim();
-  const p = new URLSearchParams();
-  if (tag) p.append('tag', tag);
-
-  try {
-    const rows = await apiFetch('/records?' + p);
-    document.getElementById('b-count').textContent = `${rows.length} records`;
-    const el = document.getElementById('b-out');
-    if (!rows.length) { el.innerHTML = '<div class="empty">No records found.</div>'; return; }
-    el.innerHTML = rows.slice().reverse().map(r => card(r, false)).join('');
-  } catch (e) { err('b-out', e.message); }
-}
-
-// ── Delete ────────────────────────────────────────────────────────────────────
-async function del(id, btn) {
-  if (!confirm('Delete this record?')) return;
-  try {
-    await fetch('/records/' + id, { method: 'DELETE' });
-    const el = btn.closest('.card');
-    el.style.transition = 'opacity 0.2s';
-    el.style.opacity = '0';
-    setTimeout(() => el.remove(), 200);
-    loadStats();
-    toast('Deleted');
-  } catch (e) { toast(e.message, 'err'); }
-}
-
-// ── Summarize ─────────────────────────────────────────────────────────────────
-async function doSummarize() {
-  loading('u-out');
-  const p = new URLSearchParams();
-  const topic  = document.getElementById('u-topic').value.trim();
-  const tag    = document.getElementById('u-tag').value.trim();
-  const after  = toUnix(document.getElementById('u-after').value.trim());
-  const before = toUnix(document.getElementById('u-before').value.trim());
-  const top    = document.getElementById('u-top').value;
-
-  if (topic)  p.append('topic', topic);
-  if (tag)    p.append('tag', tag);
-  if (after)  p.append('after', after);
-  if (before) p.append('before', before);
-  if (top)    p.append('top', top);
-
-  try {
-    const res = await apiFetch('/summarize?' + p);
-    document.getElementById('u-out').innerHTML = `
-      <div class="summary">
-        ${nl(res.summary)}
-        <div class="summary-meta">${res.record_count} records used as context</div>
-      </div>`;
-  } catch (e) { err('u-out', e.message); }
-}
-
-// ── Browse tag cloud ──────────────────────────────────────────────────────────
-async function loadBrowseTags() {
-  try {
-    const tags = await apiFetch('/tags');
-    const el = document.getElementById('b-tags');
-    if (!tags.length) { el.innerHTML = ''; return; }
-    el.innerHTML = tags.map(t =>
-      `<span class="tag" style="cursor:pointer;margin:2px;" onclick="filterByTag('${esc(t.tag)}')">${esc(t.tag)} <span style="opacity:.6">${t.count}</span></span>`
-    ).join('');
-  } catch {}
-}
-function filterByTag(tag) {
-  document.getElementById('b-tag').value = tag;
-  doBrowse();
-}
-
-// ── Import ────────────────────────────────────────────────────────────────────
-async function onImportFile(e) {
-  const file = e.target.files[0];
-  if (!file) return;
-  document.getElementById('im-text').value = await file.text();
-  const ext = file.name.split('.').pop().toLowerCase();
-  const sel = document.getElementById('im-format');
-  if (['json','csv','txt'].includes(ext)) sel.value = ext;
-}
-
-async function doImport() {
-  const text   = document.getElementById('im-text').value.trim();
-  const format = document.getElementById('im-format').value;
-  const tag    = document.getElementById('im-tag').value.trim();
-  const btn    = document.getElementById('im-btn');
-  if (!text) { toast('Nothing to import', 'err'); return; }
-  btn.disabled = true; btn.textContent = 'Importing…';
-  try {
-    const p = new URLSearchParams();
-    if (format) p.append('format', format);
-    if (tag)    p.append('tag', tag);
-    const res = await apiFetch('/ingest?' + p, {
-      method: 'POST',
-      headers: { 'Content-Type': 'text/plain' },
-      body: text,
-    });
-    document.getElementById('im-out').innerHTML =
-      `<div class="summary" style="color:#4caf8a;">Imported ${res.imported} records (total: ${res.total})</div>`;
-    document.getElementById('im-text').value = '';
-    document.getElementById('im-file').value = '';
-    loadStats();
-  } catch (e) { err('im-out', e.message); }
-  finally { btn.disabled = false; btn.textContent = 'Import'; }
-}
-
-// ── Timeline ──────────────────────────────────────────────────────────────────
-async function loadTimelineSessions() {
-  const sel = document.getElementById('tl-session');
-  try {
-    const sessions = await apiFetch('/timeline/sessions');
-    sel.innerHTML = '<option value="">All sessions</option>' +
-      sessions.map(s =>
-        `<option value="${esc(s.session_id)}">${esc(s.session_id.slice(0,12))} (${s.count} prompts)</option>`
-      ).join('');
-  } catch {}
-}
-
-async function doTimeline() {
-  const session = document.getElementById('tl-session').value;
-  const role    = document.querySelector('input[name="tl-role"]:checked')?.value ?? 'all';
-  const limit   = parseInt(document.getElementById('tl-limit').value) || 50;
-  loading('tl-out');
-  try {
-    const p = new URLSearchParams({ limit });
-    if (session) p.append('session', session);
-    if (role !== 'all') p.append('role', role);
-    const rows = await apiFetch('/timeline?' + p);
-    const el = document.getElementById('tl-out');
-    if (!rows.length) { el.innerHTML = '<div class="empty">No timeline entries found.</div>'; return; }
-    // セッション区切りヘッダーを挿入（全セッション表示時のみ）
-    let lastSid = undefined;
-    const parts = [];
-    for (const r of rows) {
-      const sid = r.session_id || null;
-      if (!session && sid !== lastSid) {
-        lastSid = sid;
-        const label = sid ? sid.slice(0,12) : '(no session)';
-        parts.push(`<div style="margin:16px 0 8px;padding:4px 0;border-bottom:1px solid var(--border);color:var(--muted);font-size:11px;font-family:monospace;">─ session: ${esc(label)}</div>`);
-      }
-      const isUser = r.role === 'user';
-      const roleLabel  = isUser ? 'User' : 'Claude';
-      const color  = isUser ? 'var(--accent)' : '#4caf8a';
-      parts.push(`<div class="card" style="border-left:3px solid ${color};margin-bottom:8px;">
-        <div style="display:flex;gap:8px;align-items:baseline;margin-bottom:6px;">
-          <span style="color:${color};font-weight:600;font-size:12px;">[${roleLabel}]</span>
-          <span style="color:var(--muted);font-size:11px;">${datetime(r.timestamp)}</span>
-          <button class="ghost" style="margin-left:auto;font-size:11px;padding:2px 8px;"
-            onclick="navigator.clipboard.writeText(${JSON.stringify(r.text)}).then(()=>toast('Copied'))">Copy</button>
-        </div>
-        <div style="font-size:13px;line-height:1.6;white-space:pre-wrap;">${nl(r.text)}</div>
-      </div>`);
-    }
-    el.innerHTML = parts.join('');
-  } catch (e) { err('tl-out', e.message); }
-}
-
-// ── Init ──────────────────────────────────────────────────────────────────────
+// ── Init ─────────────────────────────────────────────────────────────────────
 loadStats();
-document.getElementById('n-text').addEventListener('keydown', e => {
-  if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) doAdd();
-});
+loadTimeline();
 </script>
 </body>
 </html>

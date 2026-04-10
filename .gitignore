@@ -3,3 +3,4 @@
 *.hnsw
 .env
 .DS_Store
+.claude/

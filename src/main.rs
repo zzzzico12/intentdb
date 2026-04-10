@@ -809,6 +809,7 @@ struct SessionInfo {
     count: usize,
     first_ts: u64,
     last_ts: u64,
+    first_prompt: String,
 }
 
 #[derive(Serialize)]
@@ -1055,18 +1056,30 @@ async fn handle_timeline_sessions(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<Vec<SessionInfo>>, AppError> {
     let db = state.db.lock().await;
-    let mut map: std::collections::HashMap<String, (usize, u64, u64)> = std::collections::HashMap::new();
+    // (count, first_ts, last_ts, first_prompt)
+    let mut map: std::collections::HashMap<String, (usize, u64, u64, String)> =
+        std::collections::HashMap::new();
     for rec in db.records.iter() {
-        if let TimelineEntry::User { session_id: Some(sid), .. } = classify_record(rec) {
-            let entry = map.entry(sid).or_insert((0, rec.timestamp, rec.timestamp));
+        if let TimelineEntry::User { prompt, session_id: Some(sid) } = classify_record(rec) {
+            let entry = map.entry(sid).or_insert((0, u64::MAX, 0, String::new()));
             entry.0 += 1;
-            if rec.timestamp < entry.1 { entry.1 = rec.timestamp; }
+            if rec.timestamp < entry.1 {
+                entry.1 = rec.timestamp;
+                entry.3 = prompt.chars().take(100).collect();
+            }
             if rec.timestamp > entry.2 { entry.2 = rec.timestamp; }
         }
     }
-    let mut sessions: Vec<SessionInfo> = map.into_iter().map(|(session_id, (count, first_ts, last_ts))| {
-        SessionInfo { session_id, count, first_ts, last_ts }
-    }).collect();
+    let mut sessions: Vec<SessionInfo> = map
+        .into_iter()
+        .map(|(session_id, (count, first_ts, last_ts, first_prompt))| SessionInfo {
+            session_id,
+            count,
+            first_ts,
+            last_ts,
+            first_prompt,
+        })
+        .collect();
     sessions.sort_by(|a, b| b.last_ts.cmp(&a.last_ts));
     Ok(Json(sessions))
 }
