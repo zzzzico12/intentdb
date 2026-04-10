@@ -253,6 +253,63 @@ HNSW グラフは `.hnsw` ファイルに別途保存。欠落時は自動再構
 
 ---
 
+## Capture: other AI tools
+
+`capture/` ディレクトリに他のAIツールとの連携ライブラリがあります。
+
+### Python wrapper（OpenAI / Anthropic SDK）
+
+```python
+# OpenAI / Gemini / Mistral / Ollama など OpenAI互換API
+import openai
+from capture.capture import IdbCapture
+
+client = IdbCapture(openai.OpenAI())
+resp = client.chat.completions.create(
+    model="gpt-4o",
+    messages=[{"role": "user", "content": "Rustのライフタイムを教えて"}]
+)
+# → 自動的に intentdb に保存される
+
+# Anthropic SDK
+import anthropic
+from capture.capture import IdbCaptureAnthropic
+
+client = IdbCaptureAnthropic(anthropic.Anthropic())
+resp = client.messages.create(
+    model="claude-opus-4-5",
+    max_tokens=1024,
+    messages=[{"role": "user", "content": "Rustのライフタイムを教えて"}]
+)
+
+# 単体保存（任意のツール）
+from capture.capture import save_conversation
+save_conversation(prompt="質問", response="回答", tags=["my-tool"])
+```
+
+### Shell function（CLI AI ツール）
+
+```bash
+# .zshrc / .bashrc に追加
+source /path/to/capture/idb_capture.sh
+
+# llm (https://llm.datasette.io/) で質問 + 自動保存
+ai "Dockerfileのベストプラクティスを教えて"
+
+# 他のCLIツールを使う場合
+export AI_CMD="sgpt"    # Shell GPT
+export AI_CMD="aichat"  # aichat
+ai "質問をここに"
+
+# 任意コマンドをラップ
+idb_wrap sgpt "Pythonの型ヒントを説明して"
+
+# セッションを新しく開始
+idb_new_session
+```
+
+---
+
 ## Contributing
 
 Issues and PRs welcome.  
