@@ -1,11 +1,11 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="en" data-theme="dark">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Prompt History</title>
   <style>
-    :root {
+    :root, [data-theme="dark"] {
       --bg:        #2b2928;
       --card:      #343130;
       --border:    #4a4644;
@@ -18,7 +18,27 @@
       --yellow:    #d4a853;
       --red:       #e07070;
       --user-bg:   #3d3a38;
+      --shadow:    none;
     }
+    [data-theme="light"] {
+      --bg:        #f5f4ef;
+      --card:      #ffffff;
+      --border:    #e2ddd5;
+      --accent:    #c4623a;
+      --accent-bg: #c4623a14;
+      --accent-dim:#a04a28;
+      --text:      #1c1a17;
+      --muted:     #78726a;
+      --green:     #2a7040;
+      --yellow:    #8a6a20;
+      --red:       #b83030;
+      --user-bg:   #ede9e2;
+      --shadow:    0 1px 3px rgba(0,0,0,0.08);
+    }
+    [data-theme="light"] .card { box-shadow: var(--shadow); }
+    [data-theme="light"] .score-high { background: #d4f0df; border-color: #4a9a60; }
+    [data-theme="light"] .score-mid  { background: #faefd4; border-color: #9a7a30; }
+    [data-theme="light"] .score-low  { background: #fad4d4; border-color: #b84040; }
     * { box-sizing: border-box; margin: 0; padding: 0; }
     body {
       background: var(--bg); color: var(--text);
@@ -210,6 +230,7 @@
     <h1>Prompt History</h1>
     <span class="tagline">conversation log · semantic search</span>
     <span class="stats" id="stats">—</span>
+    <button class="ghost" id="theme-btn" onclick="toggleTheme()" style="font-size:12px;padding:4px 10px;">Light</button>
   </header>
 
   <div class="tabs">
@@ -542,7 +563,23 @@ async function doAsk() {
   } catch (e) { err('a-out', e.message); }
 }
 
+// ── Theme ─────────────────────────────────────────────────────────────────────
+function initTheme() {
+  const saved = localStorage.getItem('theme');
+  const theme = saved || (window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark');
+  document.documentElement.setAttribute('data-theme', theme);
+  document.getElementById('theme-btn').textContent = theme === 'dark' ? 'Light' : 'Dark';
+}
+function toggleTheme() {
+  const current = document.documentElement.getAttribute('data-theme');
+  const next = current === 'dark' ? 'light' : 'dark';
+  document.documentElement.setAttribute('data-theme', next);
+  localStorage.setItem('theme', next);
+  document.getElementById('theme-btn').textContent = next === 'dark' ? 'Light' : 'Dark';
+}
+
 // ── Init ─────────────────────────────────────────────────────────────────────
+initTheme();
 loadStats();
 loadTimeline();
 </script>
