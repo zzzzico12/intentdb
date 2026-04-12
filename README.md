@@ -50,7 +50,25 @@ The hooks POST to `idb serve`, so it must be running before any conversation is 
 OPENAI_API_KEY=sk-... idb serve --file ~/intentdb/data.idb
 ```
 
-**macOS — auto-start on login** (`~/Library/LaunchAgents/com.intentdb.plist`):
+**macOS — auto-start on login**
+
+API keys should not be written directly into plist files. Use a wrapper script that reads from `~/.zshenv` instead.
+
+**Step 1** — create `~/Library/LaunchAgents/idb_serve.sh`:
+
+```bash
+#!/bin/zsh
+source ~/.zshenv
+exec /usr/local/bin/idb \
+  --file ~/intentdb/data.idb \
+  serve --port 3000
+```
+
+```bash
+chmod +x ~/Library/LaunchAgents/idb_serve.sh
+```
+
+**Step 2** — create `~/Library/LaunchAgents/com.intentdb.plist`:
 
 ```xml
 <?xml version="1.0" encoding="UTF-8"?>
@@ -60,15 +78,8 @@ OPENAI_API_KEY=sk-... idb serve --file ~/intentdb/data.idb
     <key>Label</key><string>com.intentdb</string>
     <key>ProgramArguments</key>
     <array>
-        <string>/usr/local/bin/idb</string>
-        <string>--file</string><string>/Users/you/intentdb/data.idb</string>
-        <string>serve</string>
-        <string>--port</string><string>3000</string>
+        <string>/Users/you/Library/LaunchAgents/idb_serve.sh</string>
     </array>
-    <key>EnvironmentVariables</key>
-    <dict>
-        <key>OPENAI_API_KEY</key><string>sk-...</string>
-    </dict>
     <key>RunAtLoad</key><true/>
     <key>KeepAlive</key><true/>
     <key>StandardOutPath</key><string>/tmp/idb_serve.log</string>
@@ -477,7 +488,25 @@ cargo build --release
 OPENAI_API_KEY=sk-... idb serve --file ~/intentdb/data.idb
 ```
 
-**macOS — ログイン時に自動起動** (`~/Library/LaunchAgents/com.intentdb.plist`):
+**macOS — ログイン時に自動起動**
+
+APIキーをplistに直書きしないよう、`~/.zshenv` から読み込むラッパースクリプト経由にします。
+
+**Step 1** — `~/Library/LaunchAgents/idb_serve.sh` を作成：
+
+```bash
+#!/bin/zsh
+source ~/.zshenv
+exec /usr/local/bin/idb \
+  --file ~/intentdb/data.idb \
+  serve --port 3000
+```
+
+```bash
+chmod +x ~/Library/LaunchAgents/idb_serve.sh
+```
+
+**Step 2** — `~/Library/LaunchAgents/com.intentdb.plist` を作成：
 
 ```xml
 <?xml version="1.0" encoding="UTF-8"?>
@@ -487,17 +516,12 @@ OPENAI_API_KEY=sk-... idb serve --file ~/intentdb/data.idb
     <key>Label</key><string>com.intentdb</string>
     <key>ProgramArguments</key>
     <array>
-        <string>/usr/local/bin/idb</string>
-        <string>--file</string><string>/Users/you/intentdb/data.idb</string>
-        <string>serve</string>
-        <string>--port</string><string>3000</string>
+        <string>/Users/you/Library/LaunchAgents/idb_serve.sh</string>
     </array>
-    <key>EnvironmentVariables</key>
-    <dict>
-        <key>OPENAI_API_KEY</key><string>sk-...</string>
-    </dict>
     <key>RunAtLoad</key><true/>
     <key>KeepAlive</key><true/>
+    <key>StandardOutPath</key><string>/tmp/idb_serve.log</string>
+    <key>StandardErrorPath</key><string>/tmp/idb_serve.log</string>
 </dict>
 </plist>
 ```
