@@ -572,16 +572,20 @@ async fn ask_llm(
             ChatMessage { role: "user".to_string(), content: user_content },
         ],
     };
-    let resp: ChatResponse = client
+    let http_resp = client
         .post(url)
         .bearer_auth(api_key)
         .json(&req)
         .send()
         .await
-        .context("failed to connect to LLM API")?
-        .json()
-        .await
-        .context("failed to parse LLM API response")?;
+        .context("failed to connect to LLM API")?;
+    let status = http_resp.status();
+    let body = http_resp.text().await.context("failed to read LLM API response")?;
+    if !status.is_success() {
+        anyhow::bail!("LLM API error (HTTP {}): {}", status, body);
+    }
+    let resp: ChatResponse = serde_json::from_str(&body)
+        .with_context(|| format!("failed to parse LLM API response: {}", body))?;
     resp.choices
         .into_iter()
         .next()
@@ -1508,11 +1512,38 @@ async fn main() -> Result<()> {
                 .join("\n");
             println!("💬 asking {} ({} sources)...\n", cli.llm_model, sources.len());
             let answer = ask_llm(&question, &context, &cli.llm_url, &cli.llm_model, &api_key).await?;
-            println!("{}\n", answer);
+            println!("\x1b[1mAnswer\x1b[0m");
             println!("{}", "─".repeat(50));
-            println!("sources:");
-            for (i, rec) in sources.iter().enumerate() {
-                println!("  {}. [{}...]{} {}", i + 1, &rec.id[..8], format_tags(&rec.tags), rec.text);
+            println!("{}\n", answer);
+
+            // Interactive source browser
+            let hook_entries: Vec<(String, String)> = sources.iter().map(|rec| {
+                let entry = classify_record(rec);
+                let (label, text) = match entry {
+                    TimelineEntry::User { prompt, .. } => ("User".to_string(), prompt),
+                    TimelineEntry::Claude { text, .. } => ("Claude".to_string(), text),
+                    TimelineEntry::Note { text } => ("Note".to_string(), text),
+                };
+                (label, text)
+            }).collect();
+
+            let mut items: Vec<String> = hook_entries.iter().enumerate().map(|(i, (label, text))| {
+                format!("{}. [{}] {}", i + 1, label, truncate(text, 70))
+            }).collect();
+            items.push("── done ──".to_string());
+
+            loop {
+                let sel = dialoguer::Select::new()
+                    .with_prompt("Sources (select to read full text)")
+                    .items(&items)
+                    .default(items.len() - 1)
+                    .interact()?;
+                if sel >= hook_entries.len() { break; }
+                let (label, text) = &hook_entries[sel];
+                let rec = sources[sel];
+                println!("\n[{}] \x1b[33m{}\x1b[0m  {}", &rec.id[..8], label, format_ts(rec.timestamp));
+                println!("{}", "─".repeat(50));
+                println!("{}\n", text);
             }
         }
 
@@ -1549,19 +1580,73 @@ async fn main() -> Result<()> {
                 println!("no records found.");
                 return Ok(());
             }
-            let filtered: Vec<&IntentRecord> =
-                records.iter().filter(|rec| matches_tags(rec, &tags)).collect();
-            if !tags.is_empty() {
-                println!("📋 {} records (tag filter: {})", filtered.len(), tags.join(", "));
-            } else {
-                println!("📋 {} records", filtered.len());
+
+            // Build sessions map: session_id -> (count, first_ts, last_ts, first_prompt)
+            let mut map: HashMap<String, (usize, u64, u64, String)> = HashMap::new();
+            for rec in records.iter() {
+                if !matches_tags(rec, &tags) { continue; }
+                if let TimelineEntry::User { prompt, session_id: Some(sid) } = classify_record(rec) {
+                    let entry = map.entry(sid).or_insert((0, u64::MAX, 0, String::new()));
+                    entry.0 += 1;
+                    if rec.timestamp < entry.1 {
+                        entry.1 = rec.timestamp;
+                        entry.3 = prompt.chars().take(80).collect();
+                    }
+                    if rec.timestamp > entry.2 { entry.2 = rec.timestamp; }
+                }
             }
-            if !cli.ns.is_empty() {
-                println!("   namespace: {}", cli.ns);
+
+            if map.is_empty() {
+                println!("no sessions found.");
+                return Ok(());
             }
-            println!("{}", "─".repeat(50));
-            for (i, rec) in filtered.iter().enumerate() {
-                println!("{}. [{}...]{} {}", i + 1, &rec.id[..8], format_tags(&rec.tags), rec.text);
+
+            let mut sessions: Vec<(String, usize, u64, u64, String)> = map
+                .into_iter()
+                .map(|(sid, (count, first_ts, last_ts, first_prompt))|
+                    (sid, count, first_ts, last_ts, first_prompt))
+                .collect();
+            sessions.sort_by(|a, b| b.3.cmp(&a.3)); // newest last_ts first
+
+            let items: Vec<String> = sessions.iter().map(|(sid, count, first_ts, _last_ts, first_prompt)| {
+                let preview = truncate(first_prompt, 60);
+                format!("[{}]  {}  ·  {} prompts  ·  {}",
+                    &sid[..8], format_ts(*first_ts), count, preview)
+            }).collect();
+
+            let selection = dialoguer::Select::new()
+                .with_prompt("Select session (↑↓ / Enter)")
+                .items(&items)
+                .default(0)
+                .interact()?;
+
+            let (selected_sid, _, _, _, _) = &sessions[selection];
+
+            // Print timeline for selected session
+            let mut sorted: Vec<&IntentRecord> = records.iter().collect();
+            sorted.sort_by_key(|r| r.timestamp);
+
+            println!("\nSession: {}", selected_sid);
+            println!("{}", "─".repeat(60));
+
+            for rec in sorted.iter() {
+                let entry = classify_record(rec);
+                let keep = match &entry {
+                    TimelineEntry::User { session_id: Some(s), .. } => s == selected_sid,
+                    TimelineEntry::Claude { session_id: Some(s), .. } => s == selected_sid,
+                    _ => false,
+                };
+                if !keep { continue; }
+                let ts = format_ts(rec.timestamp);
+                match entry {
+                    TimelineEntry::User { prompt, .. } => {
+                        println!("[{}] \x1b[34m[User]\x1b[0m\n  {}\n", ts, truncate(&prompt, 300));
+                    }
+                    TimelineEntry::Claude { text, .. } => {
+                        println!("[{}] \x1b[32m[Claude]\x1b[0m\n  {}\n", ts, truncate(&text, 300));
+                    }
+                    _ => {}
+                }
             }
         }
 
