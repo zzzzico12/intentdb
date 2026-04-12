@@ -73,10 +73,6 @@ pub struct LogConversationArgs {
     pub user_text: String,
     /// Claude's response
     pub assistant_text: String,
-    /// Session ID to group turns (auto-generated UUID if omitted)
-    pub session_id: Option<String>,
-    /// Source tag to identify origin, e.g. "claude-desktop", "claude-web" (default: "claude-desktop")
-    pub source: Option<String>,
 }
 
 fn default_top() -> usize { 5 }
@@ -329,10 +325,8 @@ impl IntentDbMcpHandler {
         &self,
         Parameters(args): Parameters<LogConversationArgs>,
     ) -> Result<String, String> {
-        let session_id = args
-            .session_id
-            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-        let source = args.source.as_deref().unwrap_or("claude-desktop");
+        let session_id = uuid::Uuid::new_v4().to_string();
+        let source = "claude-desktop";
 
         let user_text = serde_json::json!({
             "hook_event_name": "UserPromptSubmit",
