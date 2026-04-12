@@ -222,9 +222,6 @@ curl -X POST "http://localhost:3000/ingest?format=json" \
 
 Works with **Claude Code** and **Claude Desktop**.
 
-> **Note:** Claude Desktop enforces a maximum of 5 MCP tools per server.
-> `timeline` and `summarize` are available via CLI/Web UI but not exposed over MCP for this reason.
-
 ### Claude Code
 
 Add to `~/.claude/settings.json`:
@@ -644,9 +641,6 @@ idb mcp
 ## MCPサーバー
 
 **Claude Code** と **Claude Desktop** で利用できます。
-
-> **注意：** Claude Desktop は1MCPサーバーあたり最大5ツールという制限があります。
-> `timeline` と `summarize` はCLI/Web UIで利用可能ですが、この制限のためMCPには含まれていません。
 
 ### Claude Code
 
