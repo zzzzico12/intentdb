@@ -3,8 +3,8 @@
 //! Run with: idb mcp
 //! Register in Claude Code: ~/.claude/settings.json
 use crate::{
-    ask_llm, classify_record, get_embedding, hnsw_path, keyword_score, load_or_build_hnsw,
-    matches_tags, now_secs, read_db, tokenize, write_db, IntentRecord, TimelineEntry,
+    ask_llm, get_embedding, hnsw_path, keyword_score, load_or_build_hnsw,
+    matches_tags, now_secs, read_db, tokenize, write_db, IntentRecord,
 };
 use rmcp::{
     ServerHandler, ServiceExt,
@@ -65,28 +65,6 @@ pub struct ListArgs {
     pub limit: usize,
 }
 
-/// Arguments for the summarize tool.
-#[derive(Debug, Deserialize, Serialize, JsonSchema)]
-pub struct SummarizeArgs {
-    /// Topic to focus the summary on (optional, e.g. "billing issues", "deployment incidents")
-    pub topic: Option<String>,
-    /// Filter by tags
-    #[serde(default)]
-    pub tags: Vec<String>,
-    /// Maximum number of records to use as context (default: 20)
-    #[serde(default = "default_summarize_top")]
-    pub top: usize,
-}
-
-/// Arguments for the timeline tool.
-#[derive(Debug, Deserialize, Serialize, JsonSchema)]
-pub struct TimelineArgs {
-    /// Filter by session ID prefix (optional)
-    pub session: Option<String>,
-    /// Maximum entries to return (default: 50)
-    #[serde(default = "default_limit")]
-    pub limit: usize,
-}
 
 /// Arguments for the log_conversation tool.
 #[derive(Debug, Deserialize, Serialize, JsonSchema)]
@@ -104,7 +82,6 @@ pub struct LogConversationArgs {
 fn default_top() -> usize { 5 }
 fn default_alpha() -> f32 { 1.0 }
 fn default_limit() -> usize { 50 }
-fn default_summarize_top() -> usize { 20 }
 
 // ─── Handler ──────────────────────────────────────────────────────────────────
 
