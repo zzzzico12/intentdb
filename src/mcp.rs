@@ -73,6 +73,10 @@ pub struct LogConversationArgs {
     pub user_text: String,
     /// Claude's response
     pub assistant_text: String,
+    /// Session ID to group multiple turns (pass the same value across turns).
+    /// Leave empty or omit to start a new session.
+    #[serde(default)]
+    pub session_id: String,
 }
 
 fn default_top() -> usize { 5 }
@@ -325,7 +329,11 @@ impl IntentDbMcpHandler {
         &self,
         Parameters(args): Parameters<LogConversationArgs>,
     ) -> Result<String, String> {
-        let session_id = uuid::Uuid::new_v4().to_string();
+        let session_id = if args.session_id.is_empty() {
+            uuid::Uuid::new_v4().to_string()
+        } else {
+            args.session_id.clone()
+        };
 
         let user_text = serde_json::json!({
             "hook_event_name": "UserPromptSubmit",
