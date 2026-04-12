@@ -64,10 +64,12 @@ record_text = json.dumps({
     "response": last_text,
 }, ensure_ascii=False)
 payload = json.dumps([{"text": record_text, "tags": ["response"]}])
-subprocess.run(
+result = subprocess.run(
     ["/Users/otsuka/Documents/db/target/release/idb",
      "--file", "/Users/otsuka/Documents/db/data.idb",
      "import", "-", "--format", "json"],
     input=payload.encode(),
     capture_output=True,
 )
+if result.returncode != 0:
+    log(f"import failed (rc={result.returncode}): {result.stderr.decode()[:200]}")
