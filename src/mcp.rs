@@ -344,58 +344,6 @@ impl IntentDbMcpHandler {
         serde_json::to_string_pretty(&results).map_err(|e| e.to_string())
     }
 
-    /// Show prompts and Claude responses interleaved chronologically.
-    /// Returns records sorted by timestamp ascending. Prompts show the extracted
-    /// `prompt` field; responses show raw text.
-    #[tool(name = "timeline")]
-    async fn timeline(&self, Parameters(args): Parameters<TimelineArgs>) -> Result<String, String> {
-        let records = read_db(&self.db_file).map_err(|e| e.to_string())?;
-        let mut sorted: Vec<&IntentRecord> = records.iter().collect();
-        sorted.sort_by_key(|r| r.timestamp);
-
-        let results: Vec<serde_json::Value> = sorted
-            .into_iter()
-            .filter_map(|rec| {
-                let entry = classify_record(rec);
-                match &entry {
-                    TimelineEntry::User { prompt, session_id } => {
-                        if let Some(ref sid) = args.session {
-                            if !session_id.as_deref().map(|s| s.starts_with(sid.as_str())).unwrap_or(false) {
-                                return None;
-                            }
-                        }
-
-                        Some(serde_json::json!({
-                            "role": "user",
-                            "timestamp": rec.timestamp,
-                            "session_id": session_id,
-                            "text": prompt,
-                            "id": &rec.id[..8],
-                        }))
-                    }
-                    TimelineEntry::Claude { text, session_id } => {
-                        if let Some(ref sid) = args.session {
-                            if !session_id.as_deref().map(|s| s.starts_with(sid.as_str())).unwrap_or(true) {
-                                return None;
-                            }
-                        }
-                        Some(serde_json::json!({
-                            "role": "claude",
-                            "timestamp": rec.timestamp,
-                            "session_id": session_id,
-                            "text": text,
-                            "id": &rec.id[..8],
-                        }))
-                    }
-                    TimelineEntry::Note { .. } => None,
-                }
-            })
-            .take(args.limit)
-            .collect();
-
-        serde_json::to_string_pretty(&results).map_err(|e| e.to_string())
-    }
-
     /// Save a conversation turn (user message + assistant response) so it appears
     /// in `idb list` and `idb timeline`. Call this after each Claude response to
     /// capture conversations from Claude Desktop or other interfaces.
@@ -473,56 +421,6 @@ impl IntentDbMcpHandler {
         }).to_string())
     }
 
-    /// Summarize stored records using an LLM. Useful for generating digests,
-    /// weekly summaries, or understanding what's in a tag category.
-    #[tool(name = "summarize")]
-    async fn summarize(
-        &self,
-        Parameters(args): Parameters<SummarizeArgs>,
-    ) -> Result<String, String> {
-        let records = read_db(&self.db_file).map_err(|e| e.to_string())?;
-
-        let filtered: Vec<&IntentRecord> = records
-            .iter()
-            .filter(|r| matches_tags(r, &args.tags))
-            .take(args.top)
-            .collect();
-
-        if filtered.is_empty() {
-            return Ok("No records found matching the given filters.".to_string());
-        }
-
-        let context = filtered
-            .iter()
-            .enumerate()
-            .map(|(i, r)| format!("[{}] {}", i + 1, r.text))
-            .collect::<Vec<_>>()
-            .join("\n");
-
-        let topic_line = args.topic.as_deref().unwrap_or("the stored records");
-        let prompt = format!(
-            "Summarize the following records about {}. \
-             Identify key themes, patterns, and notable items. \
-             Be concise but comprehensive.",
-            topic_line
-        );
-
-        let summary = ask_llm(
-            &prompt,
-            &context,
-            &self.llm_url,
-            &self.llm_model,
-            &self.api_key,
-        )
-        .await
-        .map_err(|e| e.to_string())?;
-
-        serde_json::to_string_pretty(&serde_json::json!({
-            "summary": summary,
-            "record_count": filtered.len(),
-        }))
-        .map_err(|e| e.to_string())
-    }
 }
 
 // ─── ServerHandler impl ───────────────────────────────────────────────────────
@@ -537,7 +435,6 @@ impl ServerHandler for IntentDbMcpHandler {
                  Use `search` to find semantically related records. \
                  Use `ask` to answer questions from stored records (RAG). \
                  Use `list` to enumerate records. \
-                 Use `summarize` to get an LLM summary of stored records. \
                  Use `log_conversation` to save a user+assistant conversation turn so it \
                  appears in the timeline (call this after each response in Claude Desktop).",
             )
