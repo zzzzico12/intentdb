@@ -88,6 +88,19 @@ pub struct TimelineArgs {
     pub limit: usize,
 }
 
+/// Arguments for the log_conversation tool.
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
+pub struct LogConversationArgs {
+    /// The user's message
+    pub user_text: String,
+    /// Claude's response
+    pub assistant_text: String,
+    /// Session ID to group turns (auto-generated UUID if omitted)
+    pub session_id: Option<String>,
+    /// Source tag to identify origin, e.g. "claude-desktop", "claude-web" (default: "claude-desktop")
+    pub source: Option<String>,
+}
+
 fn default_top() -> usize { 5 }
 fn default_alpha() -> f32 { 1.0 }
 fn default_limit() -> usize { 50 }
@@ -383,6 +396,83 @@ impl IntentDbMcpHandler {
         serde_json::to_string_pretty(&results).map_err(|e| e.to_string())
     }
 
+    /// Save a conversation turn (user message + assistant response) so it appears
+    /// in `idb list` and `idb timeline`. Call this after each Claude response to
+    /// capture conversations from Claude Desktop or other interfaces.
+    #[tool(name = "log_conversation")]
+    async fn log_conversation(
+        &self,
+        Parameters(args): Parameters<LogConversationArgs>,
+    ) -> Result<String, String> {
+        let session_id = args
+            .session_id
+            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+        let source = args.source.as_deref().unwrap_or("claude-desktop");
+
+        let user_text = serde_json::json!({
+            "hook_event_name": "UserPromptSubmit",
+            "prompt": args.user_text,
+            "session_id": session_id,
+        })
+        .to_string();
+
+        let assistant_text = serde_json::json!({
+            "hook_event_name": "Stop",
+            "response": args.assistant_text,
+            "session_id": session_id,
+        })
+        .to_string();
+
+        let mut records = read_db(&self.db_file).map_err(|e| e.to_string())?;
+        let hp = hnsw_path(&self.db_file);
+        let mut index = crate::hnsw::Hnsw::load(&hp).unwrap_or_else(|_| crate::hnsw::Hnsw::new());
+
+        // Rebuild index if out of sync
+        if index.len() != records.len() {
+            index = crate::hnsw::Hnsw::build(
+                records.iter().map(|r| (r.id.clone(), r.vector.clone())),
+            );
+        }
+
+        // Save user turn
+        let user_vec = get_embedding(&user_text, &self.api_key, &self.embedding_url, &self.embedding_model)
+            .await.map_err(|e| e.to_string())?;
+        let user_id = uuid::Uuid::new_v4().to_string();
+        index.insert(user_id.clone(), user_vec.clone());
+        records.push(IntentRecord {
+            id: user_id.clone(),
+            text: user_text,
+            vector: user_vec,
+            timestamp: now_secs(),
+            tags: vec!["prompt".to_string(), source.to_string()],
+        });
+
+        // Save assistant turn
+        let asst_vec = get_embedding(&assistant_text, &self.api_key, &self.embedding_url, &self.embedding_model)
+            .await.map_err(|e| e.to_string())?;
+        let asst_id = uuid::Uuid::new_v4().to_string();
+        index.insert(asst_id.clone(), asst_vec.clone());
+        records.push(IntentRecord {
+            id: asst_id.clone(),
+            text: assistant_text,
+            vector: asst_vec,
+            timestamp: now_secs(),
+            tags: vec!["response".to_string(), source.to_string()],
+        });
+
+        write_db(&self.db_file, &records).map_err(|e| e.to_string())?;
+        index.save(&hp).map_err(|e| e.to_string())?;
+
+        tracing::info!("log_conversation: session={} source={}", &session_id[..8], source);
+        Ok(serde_json::json!({
+            "session_id": session_id,
+            "source": source,
+            "user_id": user_id,
+            "assistant_id": asst_id,
+            "total": records.len(),
+        }).to_string())
+    }
+
     /// Summarize stored records using an LLM. Useful for generating digests,
     /// weekly summaries, or understanding what's in a tag category.
     #[tool(name = "summarize")]
@@ -447,7 +537,9 @@ impl ServerHandler for IntentDbMcpHandler {
                  Use `search` to find semantically related records. \
                  Use `ask` to answer questions from stored records (RAG). \
                  Use `list` to enumerate records. \
-                 Use `summarize` to get an LLM summary of stored records.",
+                 Use `summarize` to get an LLM summary of stored records. \
+                 Use `log_conversation` to save a user+assistant conversation turn so it \
+                 appears in the timeline (call this after each response in Claude Desktop).",
             )
     }
 }
