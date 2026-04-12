@@ -326,7 +326,6 @@ impl IntentDbMcpHandler {
         Parameters(args): Parameters<LogConversationArgs>,
     ) -> Result<String, String> {
         let session_id = uuid::Uuid::new_v4().to_string();
-        let source = "claude-desktop";
 
         let user_text = serde_json::json!({
             "hook_event_name": "UserPromptSubmit",
@@ -342,53 +341,28 @@ impl IntentDbMcpHandler {
         })
         .to_string();
 
-        let mut records = read_db(&self.db_file).map_err(|e| e.to_string())?;
-        let hp = hnsw_path(&self.db_file);
-        let mut index = crate::hnsw::Hnsw::load(&hp).unwrap_or_else(|_| crate::hnsw::Hnsw::new());
+        // POST to HTTP server to avoid file write conflicts with idb serve
+        let client = reqwest::Client::new();
+        let base = "http://localhost:3000";
 
-        // Rebuild index if out of sync
-        if index.len() != records.len() {
-            index = crate::hnsw::Hnsw::build(
-                records.iter().map(|r| (r.id.clone(), r.vector.clone())),
-            );
+        let user_resp = client.post(format!("{}/records", base))
+            .json(&serde_json::json!({"text": user_text, "tags": ["prompt", "claude-desktop"]}))
+            .send().await.map_err(|e| format!("POST /records failed: {e}"))?;
+        if !user_resp.status().is_success() {
+            return Err(format!("POST /records error: {}", user_resp.status()));
         }
 
-        // Save user turn
-        let user_vec = get_embedding(&user_text, &self.api_key, &self.embedding_url, &self.embedding_model)
-            .await.map_err(|e| e.to_string())?;
-        let user_id = uuid::Uuid::new_v4().to_string();
-        index.insert(user_id.clone(), user_vec.clone());
-        records.push(IntentRecord {
-            id: user_id.clone(),
-            text: user_text,
-            vector: user_vec,
-            timestamp: now_secs(),
-            tags: vec!["prompt".to_string(), source.to_string()],
-        });
+        let asst_resp = client.post(format!("{}/records", base))
+            .json(&serde_json::json!({"text": assistant_text, "tags": ["response", "claude-desktop"]}))
+            .send().await.map_err(|e| format!("POST /records failed: {e}"))?;
+        if !asst_resp.status().is_success() {
+            return Err(format!("POST /records error: {}", asst_resp.status()));
+        }
 
-        // Save assistant turn
-        let asst_vec = get_embedding(&assistant_text, &self.api_key, &self.embedding_url, &self.embedding_model)
-            .await.map_err(|e| e.to_string())?;
-        let asst_id = uuid::Uuid::new_v4().to_string();
-        index.insert(asst_id.clone(), asst_vec.clone());
-        records.push(IntentRecord {
-            id: asst_id.clone(),
-            text: assistant_text,
-            vector: asst_vec,
-            timestamp: now_secs(),
-            tags: vec!["response".to_string(), source.to_string()],
-        });
-
-        write_db(&self.db_file, &records).map_err(|e| e.to_string())?;
-        index.save(&hp).map_err(|e| e.to_string())?;
-
-        tracing::info!("log_conversation: session={} source={}", &session_id[..8], source);
+        tracing::info!("log_conversation: session={}", &session_id[..8]);
         Ok(serde_json::json!({
             "session_id": session_id,
-            "source": source,
-            "user_id": user_id,
-            "assistant_id": asst_id,
-            "total": records.len(),
+            "source": "claude-desktop",
         }).to_string())
     }
 
