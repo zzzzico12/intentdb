@@ -1084,7 +1084,7 @@ async fn handle_timeline_sessions(
             first_prompt,
         })
         .collect();
-    sessions.sort_by(|a, b| b.last_ts.cmp(&a.last_ts));
+    sessions.sort_by_key(|b| std::cmp::Reverse(b.last_ts));
     Ok(Json(sessions))
 }
 
@@ -1606,7 +1606,7 @@ async fn main() -> Result<()> {
                 .map(|(sid, (count, first_ts, last_ts, first_prompt))|
                     (sid, count, first_ts, last_ts, first_prompt))
                 .collect();
-            sessions.sort_by(|a, b| b.3.cmp(&a.3)); // newest last_ts first
+            sessions.sort_by_key(|b| std::cmp::Reverse(b.3)); // newest last_ts first
 
             let items: Vec<String> = sessions.iter().map(|(sid, count, first_ts, _last_ts, first_prompt)| {
                 let preview = truncate(first_prompt, 60);
