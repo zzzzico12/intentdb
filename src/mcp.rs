@@ -66,6 +66,13 @@ pub struct ListArgs {
 }
 
 
+/// Arguments for the delete tool.
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
+pub struct DeleteArgs {
+    /// ID of the record to delete
+    pub id: String,
+}
+
 /// Arguments for the log_conversation tool.
 #[derive(Debug, Deserialize, Serialize, JsonSchema)]
 pub struct LogConversationArgs {
@@ -319,6 +326,22 @@ impl IntentDbMcpHandler {
             .collect();
 
         serde_json::to_string_pretty(&results).map_err(|e| e.to_string())
+    }
+
+    /// Delete a record by ID. Use `list` or `search` to find the ID first.
+    #[tool(name = "delete")]
+    async fn delete(&self, Parameters(args): Parameters<DeleteArgs>) -> Result<String, String> {
+        let client = reqwest::Client::new();
+        let resp = client
+            .delete(format!("http://localhost:3000/records/{}", args.id))
+            .send()
+            .await
+            .map_err(|e| format!("DELETE failed: {e}"))?;
+        if resp.status().is_success() {
+            Ok(format!("deleted {}", args.id))
+        } else {
+            Err(format!("DELETE error: {}", resp.status()))
+        }
     }
 
     /// Save a conversation turn (user message + assistant response) so it appears
